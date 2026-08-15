@@ -9,6 +9,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -97,12 +98,15 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			return thread;
 		});
 		submitIo("initialize local bridge", store::initialize);
+		submitIo(
+			"prune stale sync events",
+			() -> store.pruneStaleEvents(Duration.ofDays(30), 20_000)
+		);
 		heartbeatFuture = ioExecutor.scheduleWithFixedDelay(
-			() -> runIo("update connection status", () ->
-			{
-				store.writeHeartbeat(accountHash, accountName, playerTradeTracking);
-				store.cleanAcknowledgements();
-			}),
+			() -> runIo(
+				"update connection status",
+				() -> store.writeHeartbeat(accountHash, accountName, playerTradeTracking)
+			),
 			0,
 			10,
 			TimeUnit.SECONDS

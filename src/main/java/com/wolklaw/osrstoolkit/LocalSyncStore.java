@@ -10,8 +10,12 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -22,7 +26,6 @@ final class LocalSyncStore
 	private final Gson gson;
 	private final Path root;
 	private final Path events;
-	private final Path acknowledgements;
 	private final Path state;
 
 	LocalSyncStore(Gson gson, Path runeLiteDirectory)
@@ -30,14 +33,12 @@ final class LocalSyncStore
 		this.gson = gson;
 		this.root = runeLiteDirectory.resolve("osrs-toolkit");
 		this.events = root.resolve("events");
-		this.acknowledgements = root.resolve("acks");
 		this.state = root.resolve("state");
 	}
 
 	void initialize() throws IOException
 	{
 		Files.createDirectories(events);
-		Files.createDirectories(acknowledgements);
 		Files.createDirectories(state);
 	}
 
@@ -80,15 +81,47 @@ final class LocalSyncStore
 		atomicWrite(root.resolve("status.json"), gson.toJson(status));
 	}
 
-	void cleanAcknowledgements() throws IOException
+	/**
+	 * The desktop app deletes each event file itself once imported, so this is only a
+	 * safety net for events that pile up while the desktop app is closed for a long time
+	 * (or never opened at all).
+	 */
+	void pruneStaleEvents(Duration maxAge, int maxCount) throws IOException
 	{
 		initialize();
-		try (DirectoryStream<Path> stream = Files.newDirectoryStream(acknowledgements, "*.ack"))
+		List<Path> files = new ArrayList<>();
+		try (DirectoryStream<Path> stream = Files.newDirectoryStream(events, "*.json"))
 		{
-			for (Path acknowledgement : stream)
+			for (Path path : stream)
 			{
-				Files.deleteIfExists(acknowledgement);
+				files.add(path);
 			}
+		}
+		files.sort(Comparator.comparing(this::lastModifiedSafely));
+
+		Instant cutoff = Instant.now().minus(maxAge);
+		int remaining = files.size();
+		for (Path path : files)
+		{
+			boolean expired = lastModifiedSafely(path).isBefore(cutoff);
+			boolean overCount = remaining > maxCount;
+			if (expired || overCount)
+			{
+				Files.deleteIfExists(path);
+				remaining--;
+			}
+		}
+	}
+
+	private Instant lastModifiedSafely(Path path)
+	{
+		try
+		{
+			return Files.getLastModifiedTime(path).toInstant();
+		}
+		catch (IOException ex)
+		{
+			return Instant.EPOCH;
 		}
 	}
 
