@@ -14,13 +14,17 @@ off-by-default settings.
   whole order instead of just one partial fill.
 - The moment a new offer is placed, before anything has filled — so the desktop app's Journal
   can start tracking it right away instead of waiting for the first fill.
+- The moment an offer is cancelled, which ends it without a fill of its own. The desktop app
+  drops a position whose offer never filled, and resizes a part-filled one down to what actually
+  bought, so nothing is left waiting on an offer that no longer exists.
 - The character name, offer side, item, offer slot, limit price, and offer state.
 - When explicitly enabled, completed player trades with the other player's display name and
   the exact items and coins given and received.
 - When explicitly enabled, a snapshot of your equipped gear, inventory, bank contents, and
   skill levels each time you open your bank — used by the desktop app's PvM Readiness page.
   Snapshots are throttled to once every few seconds so a busy banking session doesn't flood
-  the queue.
+  the queue, and a very large bank is trimmed to its most valuable 1,200 stacks, which is the
+  most the desktop app accepts in one snapshot.
 
 It does not request credentials, automate game actions, click interfaces, alter offers, or send
 trade data over the network.

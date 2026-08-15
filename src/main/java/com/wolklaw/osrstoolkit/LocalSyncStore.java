@@ -1,9 +1,11 @@
 package com.wolklaw.osrstoolkit;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonParseException;
 import com.google.gson.reflect.TypeToken;
 import java.io.IOException;
 import java.lang.reflect.Type;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.DirectoryStream;
@@ -56,9 +58,32 @@ final class LocalSyncStore
 		{
 			return new LinkedHashMap<>();
 		}
-		String json = Files.readString(path, StandardCharsets.UTF_8);
-		Map<Integer, OfferSnapshot> snapshots = gson.fromJson(json, OFFER_STATE_TYPE);
-		return snapshots == null ? new LinkedHashMap<>() : new LinkedHashMap<>(snapshots);
+		Map<Integer, OfferSnapshot> snapshots;
+		try
+		{
+			snapshots = gson.fromJson(Files.readString(path, StandardCharsets.UTF_8), OFFER_STATE_TYPE);
+		}
+		catch (JsonParseException | CharacterCodingException ex)
+		{
+			// A damaged state file must not wedge Grand Exchange tracking for good. Every read
+			// happens on the way to a write that replaces the file, so starting from nothing
+			// costs at most one round of offers being treated as newly placed.
+			return new LinkedHashMap<>();
+		}
+		if (snapshots == null)
+		{
+			return new LinkedHashMap<>();
+		}
+		Map<Integer, OfferSnapshot> usable = new LinkedHashMap<>();
+		for (Map.Entry<Integer, OfferSnapshot> entry : snapshots.entrySet())
+		{
+			OfferSnapshot snapshot = entry.getValue();
+			if (entry.getKey() != null && snapshot != null && snapshot.isValid())
+			{
+				usable.put(entry.getKey(), snapshot);
+			}
+		}
+		return usable;
 	}
 
 	void writeOfferState(String accountHash, Map<Integer, OfferSnapshot> snapshots) throws IOException
@@ -105,10 +130,33 @@ final class LocalSyncStore
 		{
 			boolean expired = lastModifiedSafely(path).isBefore(cutoff);
 			boolean overCount = remaining > maxCount;
-			if (expired || overCount)
+			if ((expired || overCount) && Files.deleteIfExists(path))
 			{
-				Files.deleteIfExists(path);
 				remaining--;
+			}
+		}
+	}
+
+	/**
+	 * A write cut short by the client shutting down leaves its scratch file behind, and nothing
+	 * ever revisits those names. Only sweep ones old enough that no write could still be using
+	 * them, so a second client running against the same directory is left alone.
+	 */
+	void deleteStaleTemporaryFiles(Duration minAge) throws IOException
+	{
+		initialize();
+		Instant cutoff = Instant.now().minus(minAge);
+		for (Path directory : List.of(root, events, state))
+		{
+			try (DirectoryStream<Path> stream = Files.newDirectoryStream(directory, "*.tmp"))
+			{
+				for (Path path : stream)
+				{
+					if (lastModifiedSafely(path).isBefore(cutoff))
+					{
+						Files.deleteIfExists(path);
+					}
+				}
 			}
 		}
 	}

@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.time.Duration;
@@ -67,6 +68,10 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	// Bank contents can change many times in a row while shuffling items around; only snapshot
 	// at most this often so a busy banking session doesn't flood the local event queue.
 	private static final long LOADOUT_SNAPSHOT_MIN_INTERVAL_MS = 3_000;
+	// The desktop app refuses a loadout list longer than this, and refusing one list throws away
+	// the whole snapshot — gear, inventory and skills with it. A full bank is well past the limit,
+	// so trim here rather than let the desktop app silently drop everything.
+	private static final int MAX_SYNCED_CONTAINER_ITEMS = 1_200;
 
 	@Inject
 	private Client client;
@@ -87,6 +92,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	private final Set<String> loadedAccounts = new HashSet<>();
 	private ScheduledExecutorService ioExecutor;
 	private ScheduledFuture<?> heartbeatFuture;
+	private ScheduledFuture<?> pruneFuture;
 	private LocalSyncStore store;
 	private PendingPlayerTrade pendingPlayerTrade;
 	private boolean inTradeConfirmation;
@@ -107,9 +113,13 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			return thread;
 		});
 		submitIo("initialize local bridge", store::initialize);
-		submitIo(
-			"prune stale sync events",
-			() -> store.pruneStaleEvents(Duration.ofDays(30), 20_000)
+		// A client can stay open for weeks, so housekeeping has to repeat rather than only run
+		// at start-up: the queue keeps growing the whole time the desktop app stays closed.
+		pruneFuture = ioExecutor.scheduleWithFixedDelay(
+			() -> runIo("prune stale sync files", this::pruneLocalFiles),
+			0,
+			6,
+			TimeUnit.HOURS
 		);
 		heartbeatFuture = ioExecutor.scheduleWithFixedDelay(
 			() -> runIo(
@@ -132,6 +142,11 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			heartbeatFuture.cancel(true);
 			heartbeatFuture = null;
 		}
+		if (pruneFuture != null)
+		{
+			pruneFuture.cancel(true);
+			pruneFuture = null;
+		}
 		if (ioExecutor != null)
 		{
 			ioExecutor.shutdownNow();
@@ -148,6 +163,14 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		if (event.getGameState() == GameState.LOGGED_IN)
 		{
 			updateAccount();
+		}
+		else if (event.getGameState() == GameState.LOGIN_SCREEN)
+		{
+			// Switching characters goes through the login screen, and the Grand Exchange offers
+			// for the next account arrive before its name does. Without forgetting the old
+			// account here, those offers would be filed under it and diffed against its saved
+			// slots. Hopping deliberately does not reset: it cannot change who is logged in.
+			forgetAccount();
 		}
 	}
 
@@ -242,8 +265,12 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			maybeSyncLoadout();
 		}
-		if (!config.trackPlayerTrades() || pendingPlayerTrade == null)
+		if (!config.trackPlayerTrades() || pendingPlayerTrade == null || inTradeConfirmation)
 		{
+			// Once the confirmation screen is up, what it shows is what both sides agreed to.
+			// Any container update after that is the server emptying the trade window as the
+			// trade completes, and taking it would blank the contents moments before the
+			// "Accepted trade." message asks for them.
 			return;
 		}
 		if (event.getContainerId() == InventoryID.TRADEOFFER)
@@ -322,7 +349,10 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			current.offerId = previous.offerId;
 			int quantityDelta = current.quantityFilled - previous.quantityFilled;
 			int coinsDelta = current.spentGp - previous.spentGp;
-			if (quantityDelta > 0 && coinsDelta >= 0)
+			// continues() already guarantees both deltas are non-negative; requiring coins to
+			// be positive keeps us from writing a zero-coin fill the desktop app would only
+			// reject, which would cost the quantity in it.
+			if (quantityDelta > 0 && coinsDelta > 0)
 			{
 				store.writeEvent(
 					SyncEvent.geFill(
@@ -332,6 +362,14 @@ public class OsrsToolkitSyncPlugin extends Plugin
 						quantityDelta,
 						coinsDelta
 					)
+				);
+			}
+			if (current.isCancelled())
+			{
+				// Cancelling ends an offer without a fill of its own, so nothing above reports
+				// it. Left unsaid, a position opened for this offer waits on it forever.
+				store.writeEvent(
+					SyncEvent.geOfferCancelled(eventAccountHash, eventAccountName, current)
 				);
 			}
 		}
@@ -367,12 +405,14 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			return;
 		}
-		lastLoadoutSnapshotMillis = now;
 		updateAccount();
 		if ("unknown".equals(accountHash))
 		{
 			return;
 		}
+		// Only spend the throttle window on a snapshot actually taken, so a bank opened before
+		// the player name resolves doesn't silently cost the next few seconds of chances.
+		lastLoadoutSnapshotMillis = now;
 		List<SyncItem> equipment = containerItems(InventoryID.WORN);
 		List<SyncItem> inventory = containerItems(InventoryID.INV);
 		List<SyncItem> bank = containerItems(InventoryID.BANK);
@@ -412,7 +452,20 @@ public class OsrsToolkitSyncPlugin extends Plugin
 				: Math.max(0, itemManager.getItemPrice(item.getId()));
 			result.add(new SyncItem(item.getId(), name, item.getQuantity(), unitValue));
 		}
+		if (result.size() > MAX_SYNCED_CONTAINER_ITEMS)
+		{
+			// Keep the most valuable stacks: those are what the PvM checklists ask about, and
+			// dropping the tail is far better than the desktop app rejecting the whole snapshot.
+			result.sort(Comparator.comparingLong(SyncItem::totalValue).reversed());
+			return new ArrayList<>(result.subList(0, MAX_SYNCED_CONTAINER_ITEMS));
+		}
 		return result;
+	}
+
+	private void pruneLocalFiles() throws IOException
+	{
+		store.pruneStaleEvents(Duration.ofDays(30), 20_000);
+		store.deleteStaleTemporaryFiles(Duration.ofHours(1));
 	}
 
 	private List<SyncItem> toSyncItems(Map<Integer, Integer> items)
@@ -467,6 +520,12 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			accountName = currentName;
 			accountHash = hashAccountName(currentName);
 		}
+	}
+
+	private void forgetAccount()
+	{
+		accountName = "Not logged in";
+		accountHash = "unknown";
 	}
 
 	private static String hashAccountName(String name)

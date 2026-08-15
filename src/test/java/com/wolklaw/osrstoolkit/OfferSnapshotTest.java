@@ -65,6 +65,74 @@ public class OfferSnapshotTest
 		assertFalse(newOffer.continues(completed));
 	}
 
+	@Test
+	public void cancellingAnOfferIsBothTerminalAndCancelled()
+	{
+		OfferSnapshot cancelled = OfferSnapshot.from(
+			4,
+			new TestOffer(100, 1_000, 30, 30_000, GrandExchangeOfferState.CANCELLED_BUY),
+			"Test item"
+		);
+
+		assertTrue(cancelled.isCancelled());
+		assertTrue(cancelled.isTerminal());
+		assertEquals("buy", cancelled.side());
+	}
+
+	@Test
+	public void anOpenOfferIsNotTreatedAsCancelled()
+	{
+		OfferSnapshot buying = OfferSnapshot.from(
+			4,
+			new TestOffer(100, 1_000, 30, 30_000, GrandExchangeOfferState.BUYING),
+			"Test item"
+		);
+
+		assertFalse(buying.isCancelled());
+		assertFalse(buying.isTerminal());
+	}
+
+	@Test
+	public void aStateThisBuildDoesNotRecogniseDegradesInsteadOfThrowing()
+	{
+		// What a damaged or future-schema state file on disk deserialises into.
+		OfferSnapshot damaged = new OfferSnapshot();
+		damaged.itemId = 100;
+		damaged.totalQuantity = 10;
+		damaged.state = "SOMETHING_NEW";
+
+		assertFalse(damaged.isValid());
+		assertEquals("", damaged.side());
+		assertFalse(damaged.isTerminal());
+		assertFalse(damaged.isCancelled());
+		assertFalse(damaged.isEmpty());
+
+		OfferSnapshot missingState = new OfferSnapshot();
+		missingState.itemId = 100;
+		missingState.totalQuantity = 10;
+
+		assertFalse(missingState.isValid());
+		assertFalse(missingState.isEmpty());
+	}
+
+	@Test
+	public void anUnusablePreviousSnapshotNeverContinuesALifecycle()
+	{
+		OfferSnapshot damaged = new OfferSnapshot();
+		damaged.itemId = 100;
+		damaged.offerPrice = 1_000;
+		damaged.totalQuantity = 100;
+		damaged.state = "SOMETHING_NEW";
+
+		OfferSnapshot current = OfferSnapshot.from(
+			0,
+			new TestOffer(100, 1_000, 5, 5_000, GrandExchangeOfferState.BUYING),
+			"Test item"
+		);
+
+		assertFalse(current.continues(damaged));
+	}
+
 	private static final class TestOffer implements GrandExchangeOffer
 	{
 		private final int itemId;

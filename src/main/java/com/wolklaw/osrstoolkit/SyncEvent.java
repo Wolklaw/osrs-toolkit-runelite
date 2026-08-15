@@ -40,6 +40,15 @@ final class SyncEvent
 		);
 	}
 
+	static SyncEvent geOfferCancelled(String accountHash, String accountName, OfferSnapshot current)
+	{
+		return new SyncEvent(
+			"ge_offer_cancelled",
+			new SyncAccount(accountHash, accountName),
+			new GeOfferCancelledPayload(current)
+		);
+	}
+
 	static SyncEvent playerTrade(String accountHash, String accountName, String counterparty,
 		List<SyncItem> given, List<SyncItem> received)
 	{
@@ -124,6 +133,35 @@ final class GeOfferOpenedPayload
 	}
 }
 
+/**
+ * Deliberately the same shape as {@link GeOfferOpenedPayload}: the desktop app identifies the
+ * position an offer left behind by the offer's own size and price, so a cancellation has to
+ * carry exactly what the opening carried. How much filled before the cancellation is not sent —
+ * the desktop app already holds the fills it imported, and those are the only numbers consistent
+ * with the position it is about to resize.
+ */
+final class GeOfferCancelledPayload
+{
+	final String side;
+	final int item_id;
+	final String item_name;
+	final String offer_id;
+	final int offer_slot;
+	final int offer_price;
+	final int total_quantity;
+
+	GeOfferCancelledPayload(OfferSnapshot snapshot)
+	{
+		this.side = snapshot.side();
+		this.item_id = snapshot.itemId;
+		this.item_name = snapshot.itemName;
+		this.offer_id = snapshot.offerId;
+		this.offer_slot = snapshot.slot;
+		this.offer_price = snapshot.offerPrice;
+		this.total_quantity = snapshot.totalQuantity;
+	}
+}
+
 final class PlayerTradePayload
 {
 	final String counterparty;
@@ -168,5 +206,10 @@ final class SyncItem
 		this.item_name = itemName;
 		this.quantity = quantity;
 		this.unit_value = unitValue;
+	}
+
+	long totalValue()
+	{
+		return (long) quantity * unit_value;
 	}
 }

@@ -35,14 +35,44 @@ final class OfferSnapshot
 		return snapshot;
 	}
 
+	/**
+	 * Snapshots round-trip through JSON on disk, so a damaged or future-schema state file can
+	 * hand back a state name this build does not know. Every reader goes through here so a bad
+	 * value degrades into "unrecognised" instead of throwing and wedging Grand Exchange sync.
+	 */
+	GrandExchangeOfferState offerState()
+	{
+		if (state == null)
+		{
+			return null;
+		}
+		try
+		{
+			return GrandExchangeOfferState.valueOf(state);
+		}
+		catch (IllegalArgumentException ex)
+		{
+			return null;
+		}
+	}
+
+	boolean isValid()
+	{
+		return offerState() != null;
+	}
+
 	boolean isEmpty()
 	{
-		return itemId <= 0 || totalQuantity <= 0 || state.equals(GrandExchangeOfferState.EMPTY.name());
+		return itemId <= 0 || totalQuantity <= 0 || offerState() == GrandExchangeOfferState.EMPTY;
 	}
 
 	String side()
 	{
-		GrandExchangeOfferState offerState = GrandExchangeOfferState.valueOf(state);
+		GrandExchangeOfferState offerState = offerState();
+		if (offerState == null)
+		{
+			return "";
+		}
 		switch (offerState)
 		{
 			case BUYING:
@@ -61,6 +91,7 @@ final class OfferSnapshot
 	boolean continues(OfferSnapshot previous)
 	{
 		return previous != null
+			&& previous.isValid()
 			&& !previous.isTerminal()
 			&& itemId == previous.itemId
 			&& offerPrice == previous.offerPrice
@@ -72,10 +103,16 @@ final class OfferSnapshot
 
 	boolean isTerminal()
 	{
-		GrandExchangeOfferState offerState = GrandExchangeOfferState.valueOf(state);
+		GrandExchangeOfferState offerState = offerState();
 		return offerState == GrandExchangeOfferState.BOUGHT
 			|| offerState == GrandExchangeOfferState.SOLD
-			|| offerState == GrandExchangeOfferState.CANCELLED_BUY
+			|| isCancelled();
+	}
+
+	boolean isCancelled()
+	{
+		GrandExchangeOfferState offerState = offerState();
+		return offerState == GrandExchangeOfferState.CANCELLED_BUY
 			|| offerState == GrandExchangeOfferState.CANCELLED_SELL;
 	}
 }

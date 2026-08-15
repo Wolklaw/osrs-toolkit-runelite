@@ -67,6 +67,32 @@ public class SyncEventTest
 	}
 
 	@Test
+	public void createsCancelledPayloadMatchingTheOpeningSoTheDesktopCanPairThem()
+	{
+		OfferSnapshot snapshot = new OfferSnapshot();
+		snapshot.slot = 1;
+		snapshot.itemId = 24_615;
+		snapshot.itemName = "Blighted teleport spell sack";
+		snapshot.offerPrice = 60;
+		snapshot.totalQuantity = 8_000;
+		snapshot.quantityFilled = 3_000;
+		snapshot.spentGp = 180_000;
+		snapshot.state = "CANCELLED_BUY";
+		snapshot.offerId = "offer-id";
+
+		SyncEvent event = SyncEvent.geOfferCancelled("account-hash", "Tester", snapshot);
+		GeOfferCancelledPayload payload = (GeOfferCancelledPayload) event.payload;
+
+		assertEquals("ge_offer_cancelled", event.event_type);
+		assertEquals("buy", payload.side);
+		assertEquals(24_615, payload.item_id);
+		assertEquals(8_000, payload.total_quantity);
+		assertEquals(60, payload.offer_price);
+		assertEquals("offer-id", payload.offer_id);
+		assertEquals(1, payload.offer_slot);
+	}
+
+	@Test
 	public void createsPlayerTradeWithBothSides()
 	{
 		SyncItem coins = new SyncItem(995, "Coins", 1_000_000, 1);
