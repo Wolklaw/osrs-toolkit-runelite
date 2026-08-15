@@ -70,7 +70,7 @@ final class OfferSnapshot
 			&& spentGp >= previous.spentGp;
 	}
 
-	private boolean isTerminal()
+	boolean isTerminal()
 	{
 		GrandExchangeOfferState offerState = GrandExchangeOfferState.valueOf(state);
 		return offerState == GrandExchangeOfferState.BOUGHT

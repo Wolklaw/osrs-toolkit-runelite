@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -24,8 +25,11 @@ import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOffer;
+import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
+import net.runelite.api.ItemContainer;
 import net.runelite.api.Player;
+import net.runelite.api.Skill;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
@@ -50,8 +54,9 @@ import net.runelite.client.util.Text;
 @Slf4j
 @PluginDescriptor(
 	name = "OSRS Toolkit Sync",
-	description = "Syncs GE fills and optional player trades to the OSRS Toolkit desktop app",
-	tags = {"trade", "grand exchange", "journal", "tracker", "flipping"}
+	description = "Syncs GE fills, optional player trades, and optional PvM loadout snapshots "
+		+ "to the OSRS Toolkit desktop app",
+	tags = {"trade", "grand exchange", "journal", "tracker", "flipping", "pvm", "bank"}
 )
 public class OsrsToolkitSyncPlugin extends Plugin
 {
@@ -59,6 +64,9 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	private static final String DECLINED_TRADE = "Other player declined trade.";
 	// RuneScape exposes the other player's offer as the trade container with this API flag.
 	private static final int OTHER_PLAYER_CONTAINER = InventoryID.TRADEOFFER | 0x8000;
+	// Bank contents can change many times in a row while shuffling items around; only snapshot
+	// at most this often so a busy banking session doesn't flood the local event queue.
+	private static final long LOADOUT_SNAPSHOT_MIN_INTERVAL_MS = 3_000;
 
 	@Inject
 	private Client client;
@@ -85,6 +93,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	private volatile String accountName = "Not logged in";
 	private volatile String accountHash = "unknown";
 	private volatile boolean playerTradeTracking;
+	private volatile long lastLoadoutSnapshotMillis;
 
 	@Override
 	protected void startUp()
@@ -229,6 +238,10 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	@Subscribe
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
+		if (event.getContainerId() == InventoryID.BANK)
+		{
+			maybeSyncLoadout();
+		}
 		if (!config.trackPlayerTrades() || pendingPlayerTrade == null)
 		{
 			return;
@@ -322,6 +335,13 @@ public class OsrsToolkitSyncPlugin extends Plugin
 				);
 			}
 		}
+		else if (!current.isTerminal())
+		{
+			// A brand-new, still-open offer with nothing filled yet. Record it now instead
+			// of waiting for the first fill, so the player sees it in the Journal the
+			// moment they commit to it.
+			store.writeEvent(SyncEvent.geOfferOpened(eventAccountHash, eventAccountName, current));
+		}
 		offers.put(current.slot, current);
 		store.writeOfferState(eventAccountHash, offers);
 	}
@@ -334,6 +354,65 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			loadedAccounts.add(eventAccountHash);
 		}
 		return accountOffers.computeIfAbsent(eventAccountHash, ignored -> new HashMap<>());
+	}
+
+	private void maybeSyncLoadout()
+	{
+		if (!config.trackPvmLoadout())
+		{
+			return;
+		}
+		long now = System.currentTimeMillis();
+		if (now - lastLoadoutSnapshotMillis < LOADOUT_SNAPSHOT_MIN_INTERVAL_MS)
+		{
+			return;
+		}
+		lastLoadoutSnapshotMillis = now;
+		updateAccount();
+		if ("unknown".equals(accountHash))
+		{
+			return;
+		}
+		List<SyncItem> equipment = containerItems(InventoryID.WORN);
+		List<SyncItem> inventory = containerItems(InventoryID.INV);
+		List<SyncItem> bank = containerItems(InventoryID.BANK);
+		Map<String, Integer> skills = new LinkedHashMap<>();
+		for (Skill skill : Skill.values())
+		{
+			if ("OVERALL".equals(skill.name()))
+			{
+				continue;
+			}
+			skills.put(skill.getName(), client.getRealSkillLevel(skill));
+		}
+		SyncEvent syncEvent = SyncEvent.loadoutSnapshot(
+			accountHash, accountName, equipment, inventory, bank, skills
+		);
+		submitIo("record PvM loadout snapshot", () -> store.writeEvent(syncEvent));
+	}
+
+	private List<SyncItem> containerItems(int containerId)
+	{
+		List<SyncItem> result = new ArrayList<>();
+		ItemContainer container = client.getItemContainer(containerId);
+		if (container == null)
+		{
+			return result;
+		}
+		for (Item item : container.getItems())
+		{
+			if (item == null || item.getId() <= 0 || item.getQuantity() <= 0)
+			{
+				continue;
+			}
+			ItemComposition composition = client.getItemDefinition(item.getId());
+			String name = composition == null ? "Unknown item" : composition.getName();
+			int unitValue = item.getId() == ItemID.COINS
+				? 1
+				: Math.max(0, itemManager.getItemPrice(item.getId()));
+			result.add(new SyncItem(item.getId(), name, item.getQuantity(), unitValue));
+		}
+		return result;
 	}
 
 	private List<SyncItem> toSyncItems(Map<Integer, Integer> items)

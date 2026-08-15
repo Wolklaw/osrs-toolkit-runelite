@@ -29,4 +29,16 @@ public interface OsrsToolkitSyncConfig extends Config
 	{
 		return false;
 	}
+
+	@ConfigItem(
+		keyName = "trackPvmLoadout",
+		name = "Sync gear and bank for PvM readiness",
+		description = "When you open your bank, record your equipped gear, inventory, bank "
+			+ "contents, and skill levels so the desktop app can compare them against PvM "
+			+ "activity checklists. Nothing is uploaded."
+	)
+	default boolean trackPvmLoadout()
+	{
+		return false;
+	}
 }
