@@ -6,6 +6,7 @@ import java.util.Map;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
@@ -54,7 +55,7 @@ public class SyncEventTest
 		snapshot.state = "BUYING";
 		snapshot.offerId = "offer-id";
 
-		SyncEvent event = SyncEvent.geOfferOpened("account-hash", "Tester", snapshot);
+		SyncEvent event = SyncEvent.geOfferOpened("account-hash", "Tester", snapshot, false);
 		GeOfferOpenedPayload payload = (GeOfferOpenedPayload) event.payload;
 
 		assertEquals("ge_offer_opened", event.event_type);
@@ -64,6 +65,26 @@ public class SyncEventTest
 		assertEquals(8_000, payload.total_quantity);
 		assertEquals(60, payload.offer_price);
 		assertEquals("offer-id", payload.offer_id);
+		assertFalse(payload.restored);
+	}
+
+	@Test
+	public void marksAnOfferTheGameResentSoTheDesktopDoesNotReadItAsNewlyPlaced()
+	{
+		OfferSnapshot snapshot = new OfferSnapshot();
+		snapshot.slot = 3;
+		snapshot.itemId = 23_736;
+		snapshot.itemName = "Divine ranging potion(3)";
+		snapshot.offerPrice = 4_159;
+		snapshot.totalQuantity = 150;
+		snapshot.quantityFilled = 73;
+		snapshot.spentGp = 303_607;
+		snapshot.state = "BUYING";
+		snapshot.offerId = "offer-id";
+
+		SyncEvent event = SyncEvent.geOfferOpened("account-hash", "Tester", snapshot, true);
+
+		assertTrue(((GeOfferOpenedPayload) event.payload).restored);
 	}
 
 	@Test

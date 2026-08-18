@@ -9,6 +9,7 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.DirectoryStream;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -24,6 +25,8 @@ import java.util.UUID;
 final class LocalSyncStore
 {
 	private static final Type OFFER_STATE_TYPE = new TypeToken<Map<Integer, OfferSnapshot>>() { }.getType();
+	private static final int REPLACE_ATTEMPTS = 3;
+	private static final long REPLACE_RETRY_MILLIS = 40;
 
 	private final Gson gson;
 	private final Path root;
@@ -183,12 +186,63 @@ final class LocalSyncStore
 		return state.resolve(safeHash + ".json");
 	}
 
+	/**
+	 * Replace a file's contents in one step, retrying a moment later if the filesystem refuses.
+	 *
+	 * Windows denies the replacement outright while another process has the destination open,
+	 * and the desktop app reads the offer-state file whenever it redraws the Grand Exchange
+	 * slots — so a write can collide with a reader for no reason but timing. Losing one leaves
+	 * the saved offers behind the real ones, and the next client to start diffs live offers
+	 * against that stale picture: an offer it has been following for hours looks brand new.
+	 * A short wait outlives the reader, and the write lands on the second or third try.
+	 */
 	private void atomicWrite(Path destination, String contents) throws IOException
 	{
 		Path temporary = destination.resolveSibling(
 			destination.getFileName() + "." + UUID.randomUUID() + ".tmp"
 		);
 		Files.writeString(temporary, contents, StandardCharsets.UTF_8);
+		try
+		{
+			for (int attempt = 1; ; attempt++)
+			{
+				try
+				{
+					replace(temporary, destination);
+					return;
+				}
+				catch (FileSystemException ex)
+				{
+					if (attempt >= REPLACE_ATTEMPTS)
+					{
+						throw ex;
+					}
+					Thread.sleep(REPLACE_RETRY_MILLIS);
+				}
+			}
+		}
+		catch (InterruptedException ex)
+		{
+			Thread.currentThread().interrupt();
+			throw new IOException("Interrupted while writing " + destination.getFileName(), ex);
+		}
+		finally
+		{
+			// A move that never happened leaves its scratch file behind, and nothing else
+			// revisits that name until the hourly sweep.
+			try
+			{
+				Files.deleteIfExists(temporary);
+			}
+			catch (IOException ignored)
+			{
+				// Best effort: the sweep collects it later.
+			}
+		}
+	}
+
+	private void replace(Path temporary, Path destination) throws IOException
+	{
 		try
 		{
 			Files.move(

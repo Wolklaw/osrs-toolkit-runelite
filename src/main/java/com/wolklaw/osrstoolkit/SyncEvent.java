@@ -31,12 +31,13 @@ final class SyncEvent
 		);
 	}
 
-	static SyncEvent geOfferOpened(String accountHash, String accountName, OfferSnapshot current)
+	static SyncEvent geOfferOpened(String accountHash, String accountName, OfferSnapshot current,
+		boolean restored)
 	{
 		return new SyncEvent(
 			"ge_offer_opened",
 			new SyncAccount(accountHash, accountName),
-			new GeOfferOpenedPayload(current)
+			new GeOfferOpenedPayload(current, restored)
 		);
 	}
 
@@ -120,8 +121,15 @@ final class GeOfferOpenedPayload
 	final int offer_slot;
 	final int offer_price;
 	final int total_quantity;
+	/**
+	 * True when the game re-sent this offer as a world finished loading rather than the player
+	 * placing it. A re-sent offer is one already running, so the desktop app has to join it to
+	 * whatever position is already tracking it instead of opening a second row beside it.
+	 * Desktop builds predating this field ignore it and read every offer as newly placed.
+	 */
+	final boolean restored;
 
-	GeOfferOpenedPayload(OfferSnapshot snapshot)
+	GeOfferOpenedPayload(OfferSnapshot snapshot, boolean restored)
 	{
 		this.side = snapshot.side();
 		this.item_id = snapshot.itemId;
@@ -130,11 +138,13 @@ final class GeOfferOpenedPayload
 		this.offer_slot = snapshot.slot;
 		this.offer_price = snapshot.offerPrice;
 		this.total_quantity = snapshot.totalQuantity;
+		this.restored = restored;
 	}
 }
 
 /**
- * Deliberately the same shape as {@link GeOfferOpenedPayload}: the desktop app identifies the
+ * Carries what {@link GeOfferOpenedPayload} carries, less the flag for an offer the game re-sent
+ * — a cancellation is always something that just happened. The desktop app identifies the
  * position an offer left behind by the offer's own size and price, so a cancellation has to
  * carry exactly what the opening carried. How much filled before the cancellation is not sent —
  * the desktop app already holds the fills it imported, and those are the only numbers consistent

@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.Map;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.junit.After;
 import org.junit.Before;
@@ -52,6 +53,33 @@ public class LocalSyncStoreTest
 				return FileVisitResult.CONTINUE;
 			}
 		});
+	}
+
+	@Test
+	public void writingOfferStateLeavesNoScratchFileBehind() throws IOException
+	{
+		OfferSnapshot snapshot = new OfferSnapshot();
+		snapshot.slot = 3;
+		snapshot.itemId = 23_736;
+		snapshot.itemName = "Divine ranging potion(3)";
+		snapshot.offerPrice = 4_159;
+		snapshot.totalQuantity = 150;
+		snapshot.quantityFilled = 73;
+		snapshot.spentGp = 303_607;
+		snapshot.state = "BUYING";
+		snapshot.offerId = "offer-id";
+
+		store.writeOfferState("abc123", Collections.singletonMap(3, snapshot));
+		store.writeOfferState("abc123", Collections.singletonMap(3, snapshot));
+
+		try (Stream<Path> files = Files.list(tempDir.resolve("osrs-toolkit").resolve("state")))
+		{
+			assertEquals(
+				Collections.singletonList("abc123.json"),
+				files.map(path -> path.getFileName().toString()).collect(Collectors.toList())
+			);
+		}
+		assertEquals(73, store.readOfferState("abc123").get(3).quantityFilled);
 	}
 
 	@Test

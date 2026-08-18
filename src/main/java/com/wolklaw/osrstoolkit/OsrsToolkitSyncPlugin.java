@@ -100,6 +100,9 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	private volatile String accountHash = "unknown";
 	private volatile boolean playerTradeTracking;
 	private volatile long lastLoadoutSnapshotMillis;
+	// Client tick the world last finished loading on, or -1 before it ever has. Read on the
+	// client thread only, where the Grand Exchange events it qualifies are also delivered.
+	private int lastLoadedTick = -1;
 
 	@Override
 	protected void startUp()
@@ -162,6 +165,12 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	{
 		if (event.getGameState() == GameState.LOGGED_IN)
 		{
+			// The game re-sends every Grand Exchange offer as soon as the world finishes
+			// loading — on login, on a hop, and on a region change. Those arrive on the tick
+			// the load completes, which is the only thing that tells them apart from an offer
+			// the player just placed: this plugin's memory of the slots is lost with the
+			// client, so a restart makes a running offer look brand new.
+			lastLoadedTick = client.getTickCount();
 			updateAccount();
 		}
 		else if (event.getGameState() == GameState.LOGIN_SCREEN)
@@ -209,9 +218,10 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		OfferSnapshot snapshot = OfferSnapshot.from(event.getSlot(), offer, itemName);
 		String eventAccountHash = accountHash;
 		String eventAccountName = accountName;
+		boolean restored = client.getTickCount() - lastLoadedTick <= 1;
 		submitIo(
 			"record Grand Exchange change",
-			() -> processGrandExchangeOffer(eventAccountHash, eventAccountName, snapshot)
+			() -> processGrandExchangeOffer(eventAccountHash, eventAccountName, snapshot, restored)
 		);
 	}
 
@@ -334,7 +344,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	}
 
 	private void processGrandExchangeOffer(String eventAccountHash, String eventAccountName,
-		OfferSnapshot current) throws IOException
+		OfferSnapshot current, boolean restored) throws IOException
 	{
 		Map<Integer, OfferSnapshot> offers = loadAccountOffers(eventAccountHash);
 		OfferSnapshot previous = offers.get(current.slot);
@@ -375,10 +385,15 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		}
 		else if (!current.isTerminal())
 		{
-			// A brand-new, still-open offer with nothing filled yet. Record it now instead
-			// of waiting for the first fill, so the player sees it in the Journal the
-			// moment they commit to it.
-			store.writeEvent(SyncEvent.geOfferOpened(eventAccountHash, eventAccountName, current));
+			// A still-open offer this plugin was not already following. Usually that means the
+			// player just placed it, and recording it now — rather than waiting for the first
+			// fill — puts it in the Journal the moment they commit to it. It can equally be an
+			// offer the game re-sent after a load, one that has been running for hours; the
+			// desktop app has to be told which, because the two want opposite treatment and
+			// only it knows what is already tracked.
+			store.writeEvent(
+				SyncEvent.geOfferOpened(eventAccountHash, eventAccountName, current, restored)
+			);
 		}
 		offers.put(current.slot, current);
 		store.writeOfferState(eventAccountHash, offers);
