@@ -135,13 +135,13 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	protected void startUp()
 	{
 		playerTradeTracking = config.trackPlayerTrades();
-		store = new LocalSyncStore(gson, RuneLite.RUNELITE_DIR.toPath());
 		ioExecutor = Executors.newSingleThreadScheduledExecutor(runnable ->
 		{
 			Thread thread = new Thread(runnable, "osrs-toolkit-sync");
 			thread.setDaemon(true);
 			return thread;
 		});
+		store = new LocalSyncStore(gson, RuneLite.RUNELITE_DIR.toPath(), ioExecutor);
 		submitIo("initialize local bridge", store::initialize);
 		// A client can stay open for weeks, so housekeeping has to repeat rather than only run
 		// at start-up: the queue keeps growing the whole time the desktop app stays closed.

@@ -21,7 +21,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import lombok.extern.slf4j.Slf4j;
 
+@Slf4j
 final class LocalSyncStore
 {
 	private static final Type OFFER_STATE_TYPE = new TypeToken<Map<Integer, OfferSnapshot>>() { }.getType();
@@ -32,13 +36,15 @@ final class LocalSyncStore
 	private final Path root;
 	private final Path events;
 	private final Path state;
+	private final ScheduledExecutorService executor;
 
-	LocalSyncStore(Gson gson, Path runeLiteDirectory)
+	LocalSyncStore(Gson gson, Path runeLiteDirectory, ScheduledExecutorService executor)
 	{
 		this.gson = gson;
 		this.root = runeLiteDirectory.resolve("osrs-toolkit");
 		this.events = root.resolve("events");
 		this.state = root.resolve("state");
+		this.executor = executor;
 	}
 
 	void initialize() throws IOException
@@ -234,6 +240,10 @@ final class LocalSyncStore
 	 * the saved offers behind the real ones, and the next client to start diffs live offers
 	 * against that stale picture: an offer it has been following for hours looks brand new.
 	 * A short wait outlives the reader, and the write lands on the second or third try.
+	 *
+	 * The first attempt happens inline; a contested attempt is retried by rescheduling itself
+	 * on the same background executor rather than blocking that thread, so one contested write
+	 * never stalls whatever is queued behind it.
 	 */
 	private void atomicWrite(Path destination, String contents) throws IOException
 	{
@@ -243,40 +253,61 @@ final class LocalSyncStore
 		Files.writeString(temporary, contents, StandardCharsets.UTF_8);
 		try
 		{
-			for (int attempt = 1; ; attempt++)
+			replace(temporary, destination);
+			deleteQuietly(temporary);
+		}
+		catch (FileSystemException ex)
+		{
+			scheduleReplaceRetry(temporary, destination, 1);
+		}
+	}
+
+	private void scheduleReplaceRetry(Path temporary, Path destination, int attempt)
+	{
+		executor.schedule(
+			() -> retryReplace(temporary, destination, attempt),
+			REPLACE_RETRY_MILLIS,
+			TimeUnit.MILLISECONDS
+		);
+	}
+
+	private void retryReplace(Path temporary, Path destination, int attempt)
+	{
+		try
+		{
+			replace(temporary, destination);
+			deleteQuietly(temporary);
+		}
+		catch (FileSystemException ex)
+		{
+			if (attempt >= REPLACE_ATTEMPTS)
 			{
-				try
-				{
-					replace(temporary, destination);
-					return;
-				}
-				catch (FileSystemException ex)
-				{
-					if (attempt >= REPLACE_ATTEMPTS)
-					{
-						throw ex;
-					}
-					Thread.sleep(REPLACE_RETRY_MILLIS);
-				}
+				log.debug("Giving up replacing {} after {} attempts", destination.getFileName(), attempt, ex);
+				deleteQuietly(temporary);
+			}
+			else
+			{
+				scheduleReplaceRetry(temporary, destination, attempt + 1);
 			}
 		}
-		catch (InterruptedException ex)
+		catch (IOException ex)
 		{
-			Thread.currentThread().interrupt();
-			throw new IOException("Interrupted while writing " + destination.getFileName(), ex);
+			log.debug("Unable to replace {}", destination.getFileName(), ex);
+			deleteQuietly(temporary);
 		}
-		finally
+	}
+
+	private void deleteQuietly(Path path)
+	{
+		// A move that never happened leaves its scratch file behind, and nothing else
+		// revisits that name until the hourly sweep.
+		try
 		{
-			// A move that never happened leaves its scratch file behind, and nothing else
-			// revisits that name until the hourly sweep.
-			try
-			{
-				Files.deleteIfExists(temporary);
-			}
-			catch (IOException ignored)
-			{
-				// Best effort: the sweep collects it later.
-			}
+			Files.deleteIfExists(path);
+		}
+		catch (IOException ignored)
+		{
+			// Best effort: the sweep collects it later.
 		}
 	}
 

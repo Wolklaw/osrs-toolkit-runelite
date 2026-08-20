@@ -13,6 +13,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.junit.After;
@@ -25,19 +27,22 @@ import static org.junit.Assert.assertTrue;
 public class LocalSyncStoreTest
 {
 	private Path tempDir;
+	private ScheduledExecutorService executor;
 	private LocalSyncStore store;
 
 	@Before
 	public void setUp() throws IOException
 	{
 		tempDir = Files.createTempDirectory("osrs-toolkit-sync-test");
-		store = new LocalSyncStore(new Gson(), tempDir);
+		executor = Executors.newSingleThreadScheduledExecutor();
+		store = new LocalSyncStore(new Gson(), tempDir, executor);
 		store.initialize();
 	}
 
 	@After
 	public void tearDown() throws IOException
 	{
+		executor.shutdownNow();
 		Files.walkFileTree(tempDir, new SimpleFileVisitor<Path>()
 		{
 			@Override
