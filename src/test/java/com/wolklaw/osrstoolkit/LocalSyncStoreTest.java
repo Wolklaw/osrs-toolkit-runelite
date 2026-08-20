@@ -2,6 +2,7 @@ package com.wolklaw.osrstoolkit;
 
 import com.google.gson.Gson;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -55,8 +56,7 @@ public class LocalSyncStoreTest
 		});
 	}
 
-	@Test
-	public void writingOfferStateLeavesNoScratchFileBehind() throws IOException
+	private static OfferSnapshot buyingSnapshot()
 	{
 		OfferSnapshot snapshot = new OfferSnapshot();
 		snapshot.slot = 3;
@@ -68,6 +68,13 @@ public class LocalSyncStoreTest
 		snapshot.spentGp = 303_607;
 		snapshot.state = "BUYING";
 		snapshot.offerId = "offer-id";
+		return snapshot;
+	}
+
+	@Test
+	public void writingOfferStateLeavesNoScratchFileBehind() throws IOException
+	{
+		OfferSnapshot snapshot = buyingSnapshot();
 
 		store.writeOfferState("abc123", Collections.singletonMap(3, snapshot));
 		store.writeOfferState("abc123", Collections.singletonMap(3, snapshot));
@@ -80,6 +87,38 @@ public class LocalSyncStoreTest
 			);
 		}
 		assertEquals(73, store.readOfferState("abc123").get(3).quantityFilled);
+	}
+
+	@Test
+	public void offerScreenIsWrittenBesideTheSlotsAndDeletedWhenItCloses() throws IOException
+	{
+		Path screen = tempDir.resolve("osrs-toolkit").resolve("state").resolve("abc123-screen.json");
+		store.writeOfferState("abc123", Collections.singletonMap(3, buyingSnapshot()));
+
+		store.writeOfferScreen("abc123", new OfferScreen(21_802, "Revenant cave teleport", "buy"));
+
+		String written = new String(Files.readAllBytes(screen), StandardCharsets.UTF_8);
+		assertTrue(written, written.contains("\"item_id\":21802"));
+		assertTrue(written, written.contains("\"item_name\":\"Revenant cave teleport\""));
+		assertTrue(written, written.contains("\"side\":\"buy\""));
+		store.writeOfferScreen("abc123", null);
+
+		// Absence is how the desktop app is told the box closed, so a stale file is a stale
+		// highlight — deleting has to actually delete.
+		assertTrue(Files.notExists(screen));
+		// And only the box: closing it says nothing about the offers already on the slots, which
+		// the desktop app reads from its own file beside this one.
+		assertEquals(73, store.readOfferState("abc123").get(3).quantityFilled);
+	}
+
+	@Test
+	public void clearingAnOfferScreenThatWasNeverWrittenIsHarmless() throws IOException
+	{
+		store.writeOfferScreen("abc123", null);
+
+		assertTrue(Files.notExists(
+			tempDir.resolve("osrs-toolkit").resolve("state").resolve("abc123-screen.json")
+		));
 	}
 
 	@Test

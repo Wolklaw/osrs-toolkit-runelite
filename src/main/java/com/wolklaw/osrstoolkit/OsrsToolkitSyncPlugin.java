@@ -36,11 +36,14 @@ import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.ScriptCallbackEvent;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.ItemID;
+import net.runelite.api.gameval.VarPlayerID;
+import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.RuneLite;
 import net.runelite.client.callback.ClientThread;
@@ -72,6 +75,21 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	// the whole snapshot — gear, inventory and skills with it. A full bank is well past the limit,
 	// so trim here rather than let the desktop app silently drop everything.
 	private static final int MAX_SYNCED_CONTAINER_ITEMS = 1_200;
+	// The item the "Set up offer" box is showing. RuneLite's own Grand Exchange plugin reads this
+	// same var to know what its "Buy limit: …" line is about, which is that box and nothing else.
+	// The older API called it CURRENT_GE_ITEM; gameval names it after the trading post search.
+	private static final int GE_SETUP_ITEM_VARP = VarPlayerID.TRADINGPOST_SEARCH;
+	// Which side the box is set up for. Zero is a buy: RuneLite's own item-stats plugin puts
+	// equipment stats on the offer box only while this reads zero, and stats are what you weigh
+	// before buying something, not before selling something already yours.
+	private static final int GE_SETUP_SIDE_VARBIT = VarbitID.GE_NEWOFFER_TYPE;
+	private static final int GE_SETUP_SIDE_BUY = 0;
+	// The box's examine line is drawn by one of two scripts named after the side being offered,
+	// which is the only place the interface says buy or sell in so many words. Preferred over the
+	// var above where it has fired for the item in hand; RuneLite's Grand Exchange plugin tells
+	// the two sides apart this same way.
+	private static final String BUY_EXAMINE_CALLBACK = "geBuyExamineText";
+	private static final String SELL_EXAMINE_CALLBACK = "geSellExamineText";
 
 	@Inject
 	private Client client;
@@ -103,6 +121,15 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	// Client tick the world last finished loading on, or -1 before it ever has. Read on the
 	// client thread only, where the Grand Exchange events it qualifies are also delivered.
 	private int lastLoadedTick = -1;
+	// The "Set up offer" box as it last read, or null when it is not open on an item. Written
+	// from the client thread and read by the heartbeat on the IO thread, which re-stamps it so
+	// the desktop app can tell a box still open from one a dead client left behind.
+	private volatile OfferScreen offerScreen;
+	// Which side the box last said it was, and the item it said it about. Kept as a pair because
+	// the answer only arrives when the game redraws the examine line: holding the item alongside
+	// it is what stops a side latched for the last item being reported for the next one.
+	private String setupSide;
+	private int setupSideItemId;
 
 	@Override
 	protected void startUp()
@@ -127,7 +154,19 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		heartbeatFuture = ioExecutor.scheduleWithFixedDelay(
 			() -> runIo(
 				"update connection status",
-				() -> store.writeHeartbeat(accountHash, accountName, playerTradeTracking)
+				() ->
+				{
+					store.writeHeartbeat(accountHash, accountName, playerTradeTracking);
+					OfferScreen screen = offerScreen;
+					if (screen != null)
+					{
+						// Re-stamped rather than only written when it changes: the desktop app times
+						// this file out so a client that died with the box open cannot leave a
+						// highlight behind, which means a box left open for minutes has to keep
+						// saying it still is.
+						store.writeOfferScreen(accountHash, screen);
+					}
+				}
 			),
 			0,
 			10,
@@ -150,6 +189,14 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			pruneFuture.cancel(true);
 			pruneFuture = null;
 		}
+		// Written straight through rather than queued: the desktop app reads this file as "the
+		// player is looking at this offer right now", and the executor that would carry a queued
+		// write is shut down on the next line.
+		String closingAccountHash = accountHash;
+		runIo("clear the open offer screen", () -> store.writeOfferScreen(closingAccountHash, null));
+		offerScreen = null;
+		setupSide = null;
+		setupSideItemId = 0;
 		if (ioExecutor != null)
 		{
 			ioExecutor.shutdownNow();
@@ -175,6 +222,9 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		}
 		else if (event.getGameState() == GameState.LOGIN_SCREEN)
 		{
+			// Cleared before the hash it is filed under is forgotten, or the file would be left
+			// behind under the old account with nothing left that knows how to find it.
+			clearOfferScreen();
 			// Switching characters goes through the login screen, and the Grand Exchange offers
 			// for the next account arrive before its name does. Without forgetting the old
 			// account here, those offers would be filed under it and diffed against its saved
@@ -191,6 +241,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			captureCounterparty();
 		}
+		refreshOfferScreen();
 	}
 
 	@Subscribe
@@ -248,6 +299,14 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	@Subscribe
 	public void onWidgetClosed(WidgetClosed event)
 	{
+		if (event.getGroupId() == InterfaceID.GE_OFFERS)
+		{
+			// Answered here rather than left to the next tick: walking away from the Grand
+			// Exchange is the moment the desktop app's highlight stops meaning anything, and a
+			// tick of it pointing at a row nobody is standing in front of is a tick too many.
+			clearOfferScreen();
+			return;
+		}
 		if (event.getGroupId() == InterfaceID.TRADEMAIN && pendingPlayerTrade != null)
 		{
 			clientThread.invokeLater(() ->
@@ -266,6 +325,21 @@ public class OsrsToolkitSyncPlugin extends Plugin
 				inTradeConfirmation = false;
 			});
 		}
+	}
+
+	@Subscribe
+	public void onScriptCallbackEvent(ScriptCallbackEvent event)
+	{
+		boolean buy = BUY_EXAMINE_CALLBACK.equals(event.getEventName());
+		if (!buy && !SELL_EXAMINE_CALLBACK.equals(event.getEventName()))
+		{
+			return;
+		}
+		// Latched together with the item it was said about: the game only runs these scripts
+		// when it redraws the examine line, so without the item alongside it the side chosen
+		// for the last thing looked at would go on being reported for the next one.
+		setupSide = buy ? "buy" : "sell";
+		setupSideItemId = client.getVarpValue(GE_SETUP_ITEM_VARP);
 	}
 
 	@Subscribe
@@ -341,6 +415,10 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			pendingPlayerTrade = null;
 			inTradeConfirmation = false;
 		}
+		if (!config.trackGrandExchange())
+		{
+			clearOfferScreen();
+		}
 	}
 
 	private void processGrandExchangeOffer(String eventAccountHash, String eventAccountName,
@@ -397,6 +475,118 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		}
 		offers.put(current.slot, current);
 		store.writeOfferState(eventAccountHash, offers);
+	}
+
+	/**
+	 * Notice the "Set up offer" box opening, closing, or changing what it is on, and tell the
+	 * desktop app when it does.
+	 *
+	 * Polled on the tick rather than driven by an event, because there is no one event to drive
+	 * it from: the box is a panel inside an interface that is already loaded, the var holding
+	 * its item keeps the last thing picked long after the interface is gone, and the script that
+	 * names the side only runs when the examine line is redrawn. Reading all three together once
+	 * a tick is both the simplest way to be right and cheap enough not to matter — and the write
+	 * only happens on the ticks where the answer actually moved.
+	 */
+	private void refreshOfferScreen()
+	{
+		OfferScreen current = readOfferScreen();
+		if (current == null)
+		{
+			clearOfferScreen();
+			return;
+		}
+		if (current.equals(offerScreen))
+		{
+			return;
+		}
+		offerScreen = current;
+		String eventAccountHash = accountHash;
+		submitIo(
+			"record the open offer screen",
+			() -> store.writeOfferScreen(eventAccountHash, current)
+		);
+	}
+
+	/**
+	 * Where in the Grand Exchange the player is, or null when they are not in it at all.
+	 *
+	 * Two answers, because a trade is a session rather than a moment. Standing anywhere in the
+	 * interface is worth saying on its own — an offer placed a minute ago is still the thing
+	 * being worked on while it fills and while it is collected, and the desktop app can pair
+	 * that with the slots it already reads. On top of that, the "Set up offer" box open on a
+	 * chosen item is worth saying precisely, because that is the one screen with two empty boxes
+	 * waiting to be typed into. An item of zero is the first answer without the second.
+	 *
+	 * Gated on the panels actually being on screen and not merely existing, because the var
+	 * holding the chosen item outlives the interface by a long way: read on its own it would
+	 * leave the desktop app pointing at a row the player walked away from an hour ago.
+	 */
+	private OfferScreen readOfferScreen()
+	{
+		if (!config.trackGrandExchange())
+		{
+			return null;
+		}
+		Widget geInterface = client.getWidget(InterfaceID.GeOffers.UNIVERSE);
+		if (geInterface == null || geInterface.isHidden())
+		{
+			return null;
+		}
+		Widget setup = client.getWidget(InterfaceID.GeOffers.SETUP);
+		if (setup == null || setup.isHidden())
+		{
+			// In the Grand Exchange, but on the slots rather than in a box: watching an offer
+			// fill, or collecting one. Which offers those are is on the slots the desktop app
+			// already reads, so naming them again here would only be a second chance to disagree.
+			return new OfferScreen(0, null, null);
+		}
+		int itemId = client.getVarpValue(GE_SETUP_ITEM_VARP);
+		if (itemId <= 0)
+		{
+			// The box is up but still on the search, with nothing chosen to point at yet.
+			return new OfferScreen(0, null, null);
+		}
+		ItemComposition composition = client.getItemDefinition(itemId);
+		String itemName = composition == null || composition.getName() == null
+			? "Unknown item"
+			: composition.getName();
+		return new OfferScreen(itemId, itemName, setupSide(itemId));
+	}
+
+	/**
+	 * Which side the box open on {@code itemId} is offering.
+	 *
+	 * The script that draws the examine line is named after the side outright, so where it has
+	 * fired for this item that is the answer. It only runs when the line is redrawn, though, so
+	 * a box already open before this plugin started has never produced one — the var is what
+	 * answers then.
+	 */
+	private String setupSide(int itemId)
+	{
+		if (itemId == setupSideItemId && setupSide != null)
+		{
+			return setupSide;
+		}
+		return client.getVarbitValue(GE_SETUP_SIDE_VARBIT) == GE_SETUP_SIDE_BUY ? "buy" : "sell";
+	}
+
+	private void clearOfferScreen()
+	{
+		setupSide = null;
+		setupSideItemId = 0;
+		if (offerScreen == null)
+		{
+			// Nothing was ever said, so there is nothing to take back — and this runs on every
+			// tick the player spends away from the Grand Exchange, which is nearly all of them.
+			return;
+		}
+		offerScreen = null;
+		String eventAccountHash = accountHash;
+		submitIo(
+			"clear the open offer screen",
+			() -> store.writeOfferScreen(eventAccountHash, null)
+		);
 	}
 
 	private Map<Integer, OfferSnapshot> loadAccountOffers(String eventAccountHash) throws IOException

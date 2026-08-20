@@ -95,6 +95,35 @@ final class LocalSyncStore
 		atomicWrite(statePath(accountHash), gson.toJson(snapshots));
 	}
 
+	/**
+	 * Record where in the Grand Exchange the player is, or take the record away.
+	 *
+	 * Absence is the message. The desktop app reads a missing file as "not at the Grand Exchange",
+	 * so walking away has to actually delete it rather than leave the last item chosen behind for
+	 * the app to go on pointing at. The stamp inside is what covers the case deletion cannot: a
+	 * client that stops existing mid-trade deletes nothing, so the app times the file out and the
+	 * plugin re-stamps it for as long as the player really is standing there.
+	 */
+	void writeOfferScreen(String accountHash, OfferScreen screen) throws IOException
+	{
+		initialize();
+		Path path = offerScreenPath(accountHash);
+		if (screen == null)
+		{
+			Files.deleteIfExists(path);
+			return;
+		}
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("schema_version", 1);
+		payload.put("updated_at", Instant.now().toString());
+		// Zero, and no name or side with it, is the interface open on nothing in particular. The
+		// file existing at all is what says the player is standing at the Grand Exchange.
+		payload.put("item_id", screen.itemId);
+		payload.put("item_name", screen.itemName);
+		payload.put("side", screen.side);
+		atomicWrite(path, gson.toJson(payload));
+	}
+
 	void writeHeartbeat(String accountHash, String accountName, boolean playerTradesEnabled)
 		throws IOException
 	{
@@ -178,12 +207,22 @@ final class LocalSyncStore
 
 	private Path statePath(String accountHash)
 	{
+		return stateFile(accountHash, ".json");
+	}
+
+	private Path offerScreenPath(String accountHash)
+	{
+		return stateFile(accountHash, "-screen.json");
+	}
+
+	private Path stateFile(String accountHash, String suffix)
+	{
 		String safeHash = accountHash == null ? "unknown" : accountHash.replaceAll("[^a-f0-9]", "");
 		if (safeHash.isEmpty())
 		{
 			safeHash = "unknown";
 		}
-		return state.resolve(safeHash + ".json");
+		return state.resolve(safeHash + suffix);
 	}
 
 	/**
