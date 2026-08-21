@@ -66,7 +66,10 @@ public class OsrsToolkitSyncPlugin extends Plugin
 {
 	private static final String ACCEPTED_TRADE = "Accepted trade.";
 	private static final String DECLINED_TRADE = "Other player declined trade.";
-	// RuneScape exposes the other player's offer as the trade container with this API flag.
+	// RuneScape exposes the other player's offer as the trade container with this API flag. The
+	// legacy net.runelite.api.InventoryID enum spells the same pairing out as
+	// TRADEOTHER(90 | 0x8000); net.runelite.api.gameval has a constant for the container but
+	// none for the flagged form, so it has to be combined here.
 	private static final int OTHER_PLAYER_CONTAINER = InventoryID.TRADEOFFER | 0x8000;
 	// Bank contents can change many times in a row while shuffling items around; only snapshot
 	// at most this often so a busy banking session doesn't flood the local event queue.
@@ -108,10 +111,13 @@ public class OsrsToolkitSyncPlugin extends Plugin
 
 	private final Map<String, Map<Integer, OfferSnapshot>> accountOffers = new HashMap<>();
 	private final Set<String> loadedAccounts = new HashSet<>();
-	private ScheduledExecutorService ioExecutor;
+	// Assigned when the plugin starts and cleared when it stops, both on the Swing event thread,
+	// but read from the client thread on every tick that queues work. Volatile so the client
+	// thread cannot be handed a stale view of either.
+	private volatile ScheduledExecutorService ioExecutor;
 	private ScheduledFuture<?> heartbeatFuture;
 	private ScheduledFuture<?> pruneFuture;
-	private LocalSyncStore store;
+	private volatile LocalSyncStore store;
 	private PendingPlayerTrade pendingPlayerTrade;
 	private boolean inTradeConfirmation;
 	private volatile String accountName = "Not logged in";
@@ -172,34 +178,48 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			10,
 			TimeUnit.SECONDS
 		);
-		updateAccount();
+		// Plugins are started on the Swing event thread, and who is logged in is the client's to
+		// answer, so the first reading has to be asked for on the thread that owns it.
+		clientThread.invokeLater(this::updateAccount);
 		log.debug("OSRS Toolkit local sync started");
 	}
 
 	@Override
 	protected void shutDown()
 	{
+		// Cancelled without interrupting. A task caught mid-flight here is a file being replaced
+		// under a reader in the desktop app; letting it finish costs milliseconds on a background
+		// thread, while interrupting it can leave a scratch file behind for the sweep to find.
 		if (heartbeatFuture != null)
 		{
-			heartbeatFuture.cancel(true);
+			heartbeatFuture.cancel(false);
 			heartbeatFuture = null;
 		}
 		if (pruneFuture != null)
 		{
-			pruneFuture.cancel(true);
+			pruneFuture.cancel(false);
 			pruneFuture = null;
 		}
-		// Written straight through rather than queued: the desktop app reads this file as "the
-		// player is looking at this offer right now", and the executor that would carry a queued
-		// write is shut down on the next line.
+		// Queued rather than written here: plugins stop on the Swing event thread, and this is a
+		// file replace. The orderly shutdown below lets the queue drain on the background thread
+		// without holding up the caller, so the desktop app still hears that the box closed.
+		LocalSyncStore closingStore = store;
 		String closingAccountHash = accountHash;
-		runIo("clear the open offer screen", () -> store.writeOfferScreen(closingAccountHash, null));
+		if (closingStore != null)
+		{
+			submitIo(
+				"clear the open offer screen",
+				() -> closingStore.writeOfferScreen(closingAccountHash, null)
+			);
+		}
 		offerScreen = null;
 		setupSide = null;
 		setupSideItemId = 0;
 		if (ioExecutor != null)
 		{
-			ioExecutor.shutdownNow();
+			// shutdown() rather than shutdownNow(): the latter interrupts whatever is running,
+			// and the queued clear above is the last thing this plugin has to say.
+			ioExecutor.shutdown();
 			ioExecutor = null;
 		}
 		pendingPlayerTrade = null;
@@ -410,15 +430,22 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			return;
 		}
 		playerTradeTracking = config.trackPlayerTrades();
-		if (!playerTradeTracking)
+		// Config changes arrive on whichever thread made them, which for the settings panel is
+		// the Swing event thread. Everything below belongs to the client thread — the trade in
+		// progress and the offer box being watched are both written there on every tick — so it
+		// is handed over rather than reached into from here.
+		clientThread.invokeLater(() ->
 		{
-			pendingPlayerTrade = null;
-			inTradeConfirmation = false;
-		}
-		if (!config.trackGrandExchange())
-		{
-			clearOfferScreen();
-		}
+			if (!playerTradeTracking)
+			{
+				pendingPlayerTrade = null;
+				inTradeConfirmation = false;
+			}
+			if (!config.trackGrandExchange())
+			{
+				clearOfferScreen();
+			}
+		});
 	}
 
 	private void processGrandExchangeOffer(String eventAccountHash, String eventAccountName,
@@ -733,6 +760,15 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		accountHash = "unknown";
 	}
 
+	/**
+	 * A stable filename for an account's state, derived from the public display name.
+	 *
+	 * Hashed rather than used directly because a display name can hold spaces and characters no
+	 * filesystem wants, and because the name of the character being played has no business
+	 * sitting in a directory listing. No credential is involved and nothing here is secret: the
+	 * display name is shown to everyone standing nearby, and the digest exists to make one short
+	 * filesystem-safe token out of it, not to protect anything.
+	 */
 	private static String hashAccountName(String name)
 	{
 		try

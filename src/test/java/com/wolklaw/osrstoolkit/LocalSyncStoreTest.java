@@ -176,6 +176,34 @@ public class LocalSyncStoreTest
 	}
 
 	@Test
+	public void offerStateIgnoresWellFormedJsonOfTheWrongShape() throws IOException
+	{
+		Path statePath = tempDir.resolve("osrs-toolkit").resolve("state").resolve("abc123.json");
+		Files.writeString(statePath, "[{\"slot\":1}]");
+
+		// Valid JSON, wrong shape: reads as no offers rather than throwing past the caller and
+		// wedging every later read.
+		assertTrue(store.readOfferState("abc123").isEmpty());
+	}
+
+	@Test
+	public void offerStateDropsASlotItCannotNameWithoutLosingTheOthers() throws IOException
+	{
+		Path statePath = tempDir.resolve("osrs-toolkit").resolve("state").resolve("abc123.json");
+		Files.writeString(
+			statePath,
+			"{\"1\":{\"slot\":1,\"itemId\":453,\"totalQuantity\":100,\"state\":\"BUYING\"},"
+				+ "\"not-a-slot\":{\"slot\":2,\"itemId\":454,\"totalQuantity\":50,\"state\":\"BUYING\"},"
+				+ "\"3\":[]}"
+		);
+
+		Map<Integer, OfferSnapshot> offers = store.readOfferState("abc123");
+
+		assertEquals(1, offers.size());
+		assertTrue(offers.containsKey(1));
+	}
+
+	@Test
 	public void offerStateDropsEntriesThisBuildCannotUnderstand() throws IOException
 	{
 		Path statePath = tempDir.resolve("osrs-toolkit").resolve("state").resolve("abc123.json");

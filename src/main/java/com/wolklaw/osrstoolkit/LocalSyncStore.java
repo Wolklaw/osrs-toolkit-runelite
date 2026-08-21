@@ -1,10 +1,10 @@
 package com.wolklaw.osrstoolkit;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
-import com.google.gson.reflect.TypeToken;
 import java.io.IOException;
-import java.lang.reflect.Type;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -28,7 +28,6 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 final class LocalSyncStore
 {
-	private static final Type OFFER_STATE_TYPE = new TypeToken<Map<Integer, OfferSnapshot>>() { }.getType();
 	private static final int REPLACE_ATTEMPTS = 3;
 	private static final long REPLACE_RETRY_MILLIS = 40;
 
@@ -67,10 +66,10 @@ final class LocalSyncStore
 		{
 			return new LinkedHashMap<>();
 		}
-		Map<Integer, OfferSnapshot> snapshots;
+		JsonElement parsed;
 		try
 		{
-			snapshots = gson.fromJson(Files.readString(path, StandardCharsets.UTF_8), OFFER_STATE_TYPE);
+			parsed = gson.fromJson(Files.readString(path, StandardCharsets.UTF_8), JsonElement.class);
 		}
 		catch (JsonParseException | CharacterCodingException ex)
 		{
@@ -79,17 +78,37 @@ final class LocalSyncStore
 			// costs at most one round of offers being treated as newly placed.
 			return new LinkedHashMap<>();
 		}
-		if (snapshots == null)
+		if (parsed == null || !parsed.isJsonObject())
 		{
+			// Well-formed JSON that is not the shape this file is written in — a list, a bare
+			// number — reads the same as no file at all rather than throwing past the caller.
 			return new LinkedHashMap<>();
 		}
+		JsonObject snapshots = parsed.getAsJsonObject();
+		// Walked slot by slot rather than deserialized in one go as a Map, because one unreadable
+		// entry should cost that slot and not the whole file — and because asking Gson for a
+		// generic Map means handing it a TypeToken, which drags in an import this plugin
+		// otherwise has no reason to carry.
 		Map<Integer, OfferSnapshot> usable = new LinkedHashMap<>();
-		for (Map.Entry<Integer, OfferSnapshot> entry : snapshots.entrySet())
+		for (Map.Entry<String, JsonElement> entry : snapshots.entrySet())
 		{
-			OfferSnapshot snapshot = entry.getValue();
-			if (entry.getKey() != null && snapshot != null && snapshot.isValid())
+			Integer slot = parseSlot(entry.getKey());
+			if (slot == null)
 			{
-				usable.put(entry.getKey(), snapshot);
+				continue;
+			}
+			OfferSnapshot snapshot;
+			try
+			{
+				snapshot = gson.fromJson(entry.getValue(), OfferSnapshot.class);
+			}
+			catch (JsonParseException ex)
+			{
+				continue;
+			}
+			if (snapshot != null && snapshot.isValid())
+			{
+				usable.put(slot, snapshot);
 			}
 		}
 		return usable;
@@ -196,6 +215,25 @@ final class LocalSyncStore
 					}
 				}
 			}
+		}
+	}
+
+	/**
+	 * The slot a state-file key names, or null where it names nothing this build can use.
+	 *
+	 * The keys are written from a {@code Map<Integer, …>}, so JSON turns them into strings on the
+	 * way out and something has to turn them back. A key that will not, from a damaged or
+	 * hand-edited file, costs its own slot and no other.
+	 */
+	private static Integer parseSlot(String key)
+	{
+		try
+		{
+			return Integer.valueOf(key);
+		}
+		catch (NumberFormatException ex)
+		{
+			return null;
 		}
 	}
 
