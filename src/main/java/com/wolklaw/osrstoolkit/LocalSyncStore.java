@@ -171,26 +171,47 @@ final class LocalSyncStore
 	void pruneStaleEvents(Duration maxAge, int maxCount) throws IOException
 	{
 		initialize();
-		List<Path> files = new ArrayList<>();
+		// Each file's age is read once here and carried alongside it. Sorting on a key it has to
+		// go back to the filesystem for would ask again on every comparison, and again in the
+		// loop below: ordering a directory at the cap costs a few hundred thousand reads that
+		// way, against one per file this way.
+		List<AgedFile> files = new ArrayList<>();
 		try (DirectoryStream<Path> stream = Files.newDirectoryStream(events, "*.json"))
 		{
 			for (Path path : stream)
 			{
-				files.add(path);
+				files.add(new AgedFile(path, lastModifiedSafely(path)));
 			}
 		}
-		files.sort(Comparator.comparing(this::lastModifiedSafely));
+		files.sort(Comparator.comparing((AgedFile file) -> file.lastModified));
 
 		Instant cutoff = Instant.now().minus(maxAge);
 		int remaining = files.size();
-		for (Path path : files)
+		for (AgedFile file : files)
 		{
-			boolean expired = lastModifiedSafely(path).isBefore(cutoff);
+			boolean expired = file.lastModified.isBefore(cutoff);
 			boolean overCount = remaining > maxCount;
-			if ((expired || overCount) && Files.deleteIfExists(path))
+			if ((expired || overCount) && Files.deleteIfExists(file.path))
 			{
 				remaining--;
 			}
+		}
+	}
+
+	/**
+	 * An event file paired with the moment it was last written, read once when the directory is
+	 * listed. Oldest first is what the count cap wants to delete in, and what "expired" is judged
+	 * against, so both answers come from the same single reading.
+	 */
+	private static final class AgedFile
+	{
+		private final Path path;
+		private final Instant lastModified;
+
+		private AgedFile(Path path, Instant lastModified)
+		{
+			this.path = path;
+			this.lastModified = lastModified;
 		}
 	}
 
