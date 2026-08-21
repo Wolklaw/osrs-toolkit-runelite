@@ -7,6 +7,36 @@ desktop toolkit's Trade Journal—even when the toolkit was closed at the time o
 Player-to-player trade tracking and PvM gear/bank sync are both available as optional,
 off-by-default settings.
 
+## Do you need it?
+
+The desktop toolkit works fine without this plugin — you just type your trades into its journal
+yourself. This is what installing it changes.
+
+**The toolkit already does, with or without this plugin:**
+
+- Its GE flip planner, watchlist, High Alchemy finder, and skilling profit tables, in full. Those
+  only need market prices.
+- The whole Trade Journal, if you record your buys and sells by hand: statuses, partial fills,
+  tax-correct profit, filters, and CSV export.
+- Its Performance page, on whatever you recorded — a plan you tracked still gets graded against
+  fills you typed in.
+- Filtering skilling methods to your levels, which is a public hiscores lookup on your display
+  name.
+
+**What this plugin adds:**
+
+- Your fills recorded for you — every buy and sell, partial or complete, including while the
+  desktop app is closed.
+- Journal positions that open the moment you place an offer, rather than when it first fills, and
+  advance when you list something for sale.
+- Your live eight Grand Exchange slots shown in the toolkit as they fill.
+- The toolkit flashing the journal row a finished buy or sale is waiting on, and highlighting the
+  row you're trading while you're stood at the GE.
+- The RuneLite activity list in the toolkit, and optionally player-to-player trade records.
+- PvM Readiness verdicts. Without the optional gear sync the toolkit still shows every boss
+  checklist and GP/hr estimate, but each boss reads "Unknown" because it has nothing of yours to
+  compare against.
+
 ## What it records
 
 - Partial and completed Grand Exchange fills, using the actual filled quantity and coins, plus
