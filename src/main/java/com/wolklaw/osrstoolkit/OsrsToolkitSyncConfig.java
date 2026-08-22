@@ -3,16 +3,76 @@ package com.wolklaw.osrstoolkit;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
+import net.runelite.client.config.ConfigSection;
 
 @ConfigGroup(OsrsToolkitSyncConfig.GROUP)
 public interface OsrsToolkitSyncConfig extends Config
 {
 	String GROUP = "osrs-toolkit-sync";
 
+	@ConfigSection(
+		name = "Connection",
+		description = "Where this plugin sends what it records, and the token that says it is yours",
+		position = 0
+	)
+	String connectionSection = "connection";
+
+	@ConfigSection(
+		name = "What to record",
+		description = "Which of your activity is recorded and sent",
+		position = 1
+	)
+	String recordingSection = "recording";
+
+	@ConfigItem(
+		keyName = "syncEnabled",
+		name = "Send to OSRS Toolkit Sync",
+		description = "Send what this plugin records to the OSRS Toolkit sync service so the "
+			+ "desktop app can import it. Nothing is sent until this is on and both the address "
+			+ "and token below are filled in.",
+		warning = "This feature submits your IP address to a 3rd-party server not controlled or "
+			+ "verified by RuneLite developers",
+		section = connectionSection,
+		position = 0
+	)
+	default boolean syncEnabled()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "serverUrl",
+		name = "Service address",
+		description = "The address of the OSRS Toolkit sync service, e.g. "
+			+ "https://sync.example.com. Set this to your own if you run the service yourself.",
+		section = connectionSection,
+		position = 1
+	)
+	default String serverUrl()
+	{
+		return "";
+	}
+
+	@ConfigItem(
+		keyName = "pairingToken",
+		name = "Pairing token",
+		description = "The token the sync service issued you. The desktop app shows the same one. "
+			+ "It identifies your queue and nothing else.",
+		secret = true,
+		section = connectionSection,
+		position = 2
+	)
+	default String pairingToken()
+	{
+		return "";
+	}
+
 	@ConfigItem(
 		keyName = "trackGrandExchange",
 		name = "Track Grand Exchange fills",
-		description = "Save completed and partial Grand Exchange fills for the OSRS Toolkit journal"
+		description = "Record completed and partial Grand Exchange fills for the OSRS Toolkit journal",
+		section = recordingSection,
+		position = 0
 	)
 	default boolean trackGrandExchange()
 	{
@@ -22,8 +82,9 @@ public interface OsrsToolkitSyncConfig extends Config
 	@ConfigItem(
 		keyName = "trackPlayerTrades",
 		name = "Track player trades",
-		description = "Locally record the other player's name and the items given and received. "
-			+ "Nothing is uploaded."
+		description = "Record the other player's name and the items given and received.",
+		section = recordingSection,
+		position = 1
 	)
 	default boolean trackPlayerTrades()
 	{
@@ -35,7 +96,9 @@ public interface OsrsToolkitSyncConfig extends Config
 		name = "Sync gear and bank for PvM readiness",
 		description = "When you open your bank, record your equipped gear, inventory, bank "
 			+ "contents, and skill levels so the desktop app can compare them against PvM "
-			+ "activity checklists. Nothing is uploaded."
+			+ "activity checklists.",
+		section = recordingSection,
+		position = 2
 	)
 	default boolean trackPvmLoadout()
 	{

@@ -12,6 +12,7 @@ import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -95,35 +96,68 @@ public class LocalSyncStoreTest
 	}
 
 	@Test
-	public void offerScreenIsWrittenBesideTheSlotsAndDeletedWhenItCloses() throws IOException
+	public void queuedEventsComeBackOldestFirstWithTheFileTheyCameFrom() throws IOException
 	{
-		Path screen = tempDir.resolve("osrs-toolkit").resolve("state").resolve("abc123-screen.json");
-		store.writeOfferState("abc123", Collections.singletonMap(3, buyingSnapshot()));
+		Path older = writeEvent("older");
+		Path newer = writeEvent("newer");
+		setModifiedDaysAgo(older, 2);
+		setModifiedDaysAgo(newer, 1);
 
-		store.writeOfferScreen("abc123", new OfferScreen(21_802, "Revenant cave teleport", "buy"));
+		List<LocalSyncStore.PendingEvent> pending = store.readPendingEvents(10);
 
-		String written = new String(Files.readAllBytes(screen), StandardCharsets.UTF_8);
-		assertTrue(written, written.contains("\"item_id\":21802"));
-		assertTrue(written, written.contains("\"item_name\":\"Revenant cave teleport\""));
-		assertTrue(written, written.contains("\"side\":\"buy\""));
-		store.writeOfferScreen("abc123", null);
-
-		// Absence is how the desktop app is told the box closed, so a stale file is a stale
-		// highlight — deleting has to actually delete.
-		assertTrue(Files.notExists(screen));
-		// And only the box: closing it says nothing about the offers already on the slots, which
-		// the desktop app reads from its own file beside this one.
-		assertEquals(73, store.readOfferState("abc123").get(3).quantityFilled);
+		// Oldest first, because a fill has to reach the desktop app in the order it happened —
+		// an offer opens before anything lands on it.
+		assertEquals(
+			List.of(older, newer),
+			pending.stream().map(event -> event.path).collect(Collectors.toList())
+		);
+		assertEquals("{}", pending.get(0).json);
 	}
 
 	@Test
-	public void clearingAnOfferScreenThatWasNeverWrittenIsHarmless() throws IOException
+	public void readingTheQueueStopsAtTheLimit() throws IOException
 	{
-		store.writeOfferScreen("abc123", null);
+		for (int index = 0; index < 5; index++)
+		{
+			setModifiedDaysAgo(writeEvent("event-" + index), 5 - index);
+		}
 
-		assertTrue(Files.notExists(
-			tempDir.resolve("osrs-toolkit").resolve("state").resolve("abc123-screen.json")
-		));
+		assertEquals(2, store.readPendingEvents(2).size());
+	}
+
+	@Test
+	public void deletingASentEventTakesItOutOfTheQueue() throws IOException
+	{
+		Path sent = writeEvent("sent");
+		writeEvent("still-waiting");
+
+		store.deleteEvent(sent);
+
+		// Only what the service confirmed it holds is dropped; everything else is still owed.
+		assertTrue(Files.notExists(sent));
+		assertEquals(1, store.readPendingEvents(10).size());
+	}
+
+	@Test
+	public void deletingAnEventThatIsAlreadyGoneIsHarmless() throws IOException
+	{
+		Path sent = writeEvent("sent");
+		store.deleteEvent(sent);
+
+		store.deleteEvent(sent);
+
+		assertTrue(Files.notExists(sent));
+	}
+
+	@Test
+	public void theQueueIgnoresScratchFilesFromWritesInFlight() throws IOException
+	{
+		writeEvent("real");
+		Files.writeString(eventsDir().resolve("half-written.json.1234.tmp"), "{\"partial\"");
+
+		List<LocalSyncStore.PendingEvent> pending = store.readPendingEvents(10);
+
+		assertEquals(1, pending.size());
 	}
 
 	@Test

@@ -121,52 +121,69 @@ final class LocalSyncStore
 	}
 
 	/**
-	 * Record where in the Grand Exchange the player is, or take the record away.
+	 * The events waiting to be sent, oldest first, and the file each one came from.
 	 *
-	 * Absence is the message. The desktop app reads a missing file as "not at the Grand Exchange",
-	 * so walking away has to actually delete it rather than leave the last item chosen behind for
-	 * the app to go on pointing at. The stamp inside is what covers the case deletion cannot: a
-	 * client that stops existing mid-trade deletes nothing, so the app times the file out and the
-	 * plugin re-stamps it for as long as the player really is standing there.
+	 * The queue on disk is this plugin's own outbox and nothing else reads it. It exists so that
+	 * a fill recorded while the service is unreachable — or while the client is closed before it
+	 * could be sent — is still there to send afterwards. A file is deleted only once the service
+	 * has said it holds the event.
 	 */
-	void writeOfferScreen(String accountHash, OfferScreen screen) throws IOException
+	List<PendingEvent> readPendingEvents(int limit) throws IOException
 	{
 		initialize();
-		Path path = offerScreenPath(accountHash);
-		if (screen == null)
+		List<AgedFile> files = new ArrayList<>();
+		try (DirectoryStream<Path> stream = Files.newDirectoryStream(events, "*.json"))
 		{
-			Files.deleteIfExists(path);
-			return;
+			for (Path path : stream)
+			{
+				files.add(new AgedFile(path, lastModifiedSafely(path)));
+			}
 		}
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("schema_version", 1);
-		payload.put("updated_at", Instant.now().toString());
-		// Zero, and no name or side with it, is the interface open on nothing in particular. The
-		// file existing at all is what says the player is standing at the Grand Exchange.
-		payload.put("item_id", screen.itemId);
-		payload.put("item_name", screen.itemName);
-		payload.put("side", screen.side);
-		atomicWrite(path, gson.toJson(payload));
+		files.sort(Comparator.comparing((AgedFile file) -> file.lastModified));
+
+		List<PendingEvent> pending = new ArrayList<>();
+		for (AgedFile file : files)
+		{
+			if (pending.size() >= limit)
+			{
+				break;
+			}
+			try
+			{
+				pending.add(new PendingEvent(file.path, Files.readString(file.path, StandardCharsets.UTF_8)));
+			}
+			catch (IOException ex)
+			{
+				// A file being written as we read it is not a failure worth reporting; the next
+				// flush finds it finished.
+				log.debug("Skipping an unreadable queued event", ex);
+			}
+		}
+		return pending;
 	}
 
-	void writeHeartbeat(String accountHash, String accountName, boolean playerTradesEnabled)
-		throws IOException
+	void deleteEvent(Path path)
 	{
-		initialize();
-		Map<String, Object> status = new LinkedHashMap<>();
-		status.put("schema_version", 1);
-		status.put("active", true);
-		status.put("updated_at", Instant.now().toString());
-		status.put("account_hash", accountHash);
-		status.put("account_name", accountName);
-		status.put("player_trade_tracking", playerTradesEnabled);
-		atomicWrite(root.resolve("status.json"), gson.toJson(status));
+		deleteQuietly(path);
+	}
+
+	/** One queued event: the file it lives in, and the JSON to send. */
+	static final class PendingEvent
+	{
+		final Path path;
+		final String json;
+
+		PendingEvent(Path path, String json)
+		{
+			this.path = path;
+			this.json = json;
+		}
 	}
 
 	/**
-	 * The desktop app deletes each event file itself once imported, so this is only a
-	 * safety net for events that pile up while the desktop app is closed for a long time
-	 * (or never opened at all).
+	 * A queued event is deleted as soon as the service says it holds it, so this is only a
+	 * safety net for events that pile up while the service is unreachable for a long time — or
+	 * while the plugin was never pointed at one in the first place.
 	 */
 	void pruneStaleEvents(Duration maxAge, int maxCount) throws IOException
 	{
@@ -273,11 +290,6 @@ final class LocalSyncStore
 	private Path statePath(String accountHash)
 	{
 		return stateFile(accountHash, ".json");
-	}
-
-	private Path offerScreenPath(String accountHash)
-	{
-		return stateFile(accountHash, "-screen.json");
 	}
 
 	private Path stateFile(String accountHash, String suffix)

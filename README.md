@@ -2,40 +2,13 @@
 
 RuneLite companion plugin for [OSRS Toolkit](https://github.com/Wolklaw/OSRS-Toolkit).
 
-It records Grand Exchange fills while RuneLite is running and makes them available to the
-desktop toolkit's Trade Journal—even when the toolkit was closed at the time of the trade.
-Player-to-player trade tracking and PvM gear/bank sync are both available as optional,
-off-by-default settings.
+It records Grand Exchange fills while RuneLite is running and sends them to the OSRS Toolkit
+sync service, so the desktop app's Trade Journal has them — even when the app was closed at the
+time of the trade. Player-to-player trade tracking and PvM gear/bank sync are both available as
+optional, off-by-default settings.
 
-## Do you need it?
-
-The desktop toolkit works fine without this plugin — you just type your trades into its journal
-yourself. This is what installing it changes.
-
-**The toolkit already does, with or without this plugin:**
-
-- Its GE flip planner, watchlist, High Alchemy finder, and skilling profit tables, in full. Those
-  only need market prices.
-- The whole Trade Journal, if you record your buys and sells by hand: statuses, partial fills,
-  tax-correct profit, filters, and CSV export.
-- Its Performance page, on whatever you recorded — a plan you tracked still gets graded against
-  fills you typed in.
-- Filtering skilling methods to your levels, which is a public hiscores lookup on your display
-  name.
-
-**What this plugin adds:**
-
-- Your fills recorded for you — every buy and sell, partial or complete, including while the
-  desktop app is closed.
-- Journal positions that open the moment you place an offer, rather than when it first fills, and
-  advance when you list something for sale.
-- Your live eight Grand Exchange slots shown in the toolkit as they fill.
-- The toolkit flashing the journal row a finished buy or sale is waiting on, and highlighting the
-  row you're trading while you're stood at the GE.
-- The RuneLite activity list in the toolkit, and optionally player-to-player trade records.
-- PvM Readiness verdicts. Without the optional gear sync the toolkit still shows every boss
-  checklist and GP/hr estimate, but each boss reads "Unknown" because it has nothing of yours to
-  compare against.
+**The plugin sends nothing until you turn it on.** Sync is off by default, and even switched on
+it does nothing until you give it a service address and a pairing token.
 
 ## What it records
 
@@ -48,56 +21,44 @@ yourself. This is what installing it changes.
   drops a position whose offer never filled, and resizes a part-filled one down to what actually
   bought, so nothing is left waiting on an offer that no longer exists.
 - The character name, offer side, item, offer slot, limit price, and offer state.
-- When explicitly enabled, completed player trades with the other player's display name and
-  the exact items and coins given and received.
-- When explicitly enabled, a snapshot of your equipped gear, inventory, bank contents, and
-  skill levels each time you open your bank — used by the desktop app's PvM Readiness page.
-  Snapshots are throttled to once every few seconds so a busy banking session doesn't flood
-  the queue, and a very large bank is trimmed to its most valuable 1,200 stacks, which is the
-  most the desktop app accepts in one snapshot.
+- Where in the Grand Exchange you are standing, so the desktop app can point at the Journal row
+  the trade in front of you needs.
+- When explicitly enabled, completed player trades with the other player's display name and the
+  exact items and coins given and received.
+- When explicitly enabled, a snapshot of your equipped gear, inventory, bank contents, and skill
+  levels each time you open your bank — used by the desktop app's PvM Readiness page. Snapshots
+  are throttled, skipped entirely when nothing has changed since the last one, and a very large
+  bank is trimmed to its most valuable 1,200 stacks.
 
-It does not request credentials, automate game actions, click interfaces, alter offers, or send
-trade data over the network.
+It does not request credentials, automate game actions, click interfaces, or alter offers.
 
-## Local connection
+## Where it sends
 
-The plugin writes atomic JSON events under `.runelite/osrs-toolkit/events`. OSRS Toolkit imports
-them into its local journal and removes the queue file once durably committed. Offer snapshots
-are retained locally so restarting RuneLite does not turn an existing offer into a duplicate fill.
-Event files older than 30 days, or beyond 20,000 queued files, are pruned automatically as a
-safety net for when the desktop app stays closed for a long time.
+To the address you put in the settings, and nowhere else. The service is
+[osrs-toolkit-sync-server](https://github.com/Wolklaw/osrs-toolkit-sync-server) — open source,
+so what receives your data can be read rather than taken on trust. You can run it yourself and
+point the plugin at your own copy.
 
-The plugin can keep queuing events while the desktop app is closed. Trades made through mobile,
-the official client, or RuneLite while this plugin is disabled cannot be reconstructed later.
+The service holds your events only until the desktop app collects them, then deletes them. There
+is no account, no password and no email; a pairing token is the only identifier, and the service
+stores only a hash of it.
 
-## Development
+The endpoint contract is documented at
+[docs/sync-api.md](https://github.com/Wolklaw/OSRS-Toolkit/blob/main/docs/sync-api.md).
 
-This project follows RuneLite's standard Plugin Hub layout and targets Java 11 bytecode.
+## Setting it up
 
-```text
-gradlew.bat clean test
-gradlew.bat run
-```
+1. Get a pairing token from your sync service, or from the desktop app's Support tab.
+2. In RuneLite, open this plugin's settings.
+3. Fill in **Service address** and **Pairing token**, then switch on **Send to OSRS Toolkit
+   Sync**.
+4. Enter the same token in the desktop app.
 
-The second command opens a RuneLite development client; it never automates login or gameplay.
+## If the service is unreachable
 
-### Development login with a Jagex Account
+Events queue up on disk under `.runelite/osrs-toolkit/events` and are sent when it comes back.
+Nothing is deleted from the queue until the service confirms it has it, so a fill recorded while
+your connection was down still reaches the Journal afterwards. The queue is pruned after 30 days
+or 20,000 events as a safety net.
 
-This temporary setup is required only when testing the plugin from a development client. Normal
-Plugin Hub users launch RuneLite through the Jagex Launcher as usual.
-
-1. Confirm the RuneLite launcher is version 2.6.3 or newer.
-2. Open **RuneLite (configure)** from the Windows Start Menu.
-3. Add `--insecure-write-credentials` to **Client arguments** and save.
-4. Launch RuneLite once through the Jagex Launcher. It writes a temporary
-   `.runelite/credentials.properties` session file.
-5. Start the development client again.
-
-Never share, copy into this repository, or upload `credentials.properties`. When testing is
-finished, delete that file. Use **End sessions** in the account settings on runescape.com if the
-temporary session ever needs to be invalidated. See RuneLite's
-[Using Jagex Accounts](https://github.com/runelite/runelite/wiki/Using-Jagex-Accounts) guide.
-
-## License
-
-BSD 2-Clause. This permissive license is required for RuneLite Plugin Hub submissions.
+That queue is this plugin's own outbox — nothing else reads it.

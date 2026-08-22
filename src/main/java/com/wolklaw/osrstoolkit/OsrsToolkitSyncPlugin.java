@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.inject.Provides;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -17,6 +18,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -54,12 +56,13 @@ import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.util.Text;
+import okhttp3.OkHttpClient;
 
 @Slf4j
 @PluginDescriptor(
 	name = "OSRS Toolkit Sync",
-	description = "Syncs GE fills, optional player trades, and optional PvM loadout snapshots "
-		+ "to the OSRS Toolkit desktop app",
+	description = "Sends GE fills, optional player trades, and optional PvM loadout snapshots "
+		+ "to the OSRS Toolkit sync service for the desktop app to import",
 	tags = {"trade", "grand exchange", "journal", "tracker", "flipping", "pvm", "bank"}
 )
 public class OsrsToolkitSyncPlugin extends Plugin
@@ -91,6 +94,18 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	// which is the only place the interface says buy or sell in so many words. Preferred over the
 	// var above where it has fired for the item in hand; RuneLite's Grand Exchange plugin tells
 	// the two sides apart this same way.
+	// How often the plugin says "still here" when it has had nothing else to send. Liveness is
+	// otherwise derived from any request at all, so this only has to be often enough that a
+	// player sitting still does not read as disconnected.
+	private static final long HEARTBEAT_SECONDS = 60;
+	// How often the outbox is emptied. Short, because a fill the player just made is the thing
+	// the desktop app most wants promptly; a pass over an empty directory costs nothing.
+	private static final long FLUSH_SECONDS = 5;
+	// Ceilings on one batch. The count matches what the service accepts; the byte budget is the
+	// one that actually binds, because a loadout snapshot runs to six figures and a hundred of
+	// them would be refused outright for exceeding the body limit.
+	private static final int MAX_EVENTS_PER_FLUSH = 100;
+	private static final int MAX_FLUSH_BYTES = 512 * 1024;
 	private static final String BUY_EXAMINE_CALLBACK = "geBuyExamineText";
 	private static final String SELL_EXAMINE_CALLBACK = "geSellExamineText";
 
@@ -109,6 +124,9 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	@Inject
 	private OsrsToolkitSyncConfig config;
 
+	@Inject
+	private OkHttpClient okHttpClient;
+
 	private final Map<String, Map<Integer, OfferSnapshot>> accountOffers = new HashMap<>();
 	private final Set<String> loadedAccounts = new HashSet<>();
 	// Assigned when the plugin starts and cleared when it stops, both on the Swing event thread,
@@ -117,7 +135,18 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	private volatile ScheduledExecutorService ioExecutor;
 	private ScheduledFuture<?> heartbeatFuture;
 	private ScheduledFuture<?> pruneFuture;
+	private ScheduledFuture<?> flushFuture;
 	private volatile LocalSyncStore store;
+	private volatile SyncClient syncClient;
+	// Dropped to one after a batch the service refused, so the payload it will not take is
+	// isolated and discarded on its own rather than taking a hundred good events with it.
+	private volatile int flushBatchLimit = MAX_EVENTS_PER_FLUSH;
+	// True while a flush is in the air, so the timer cannot start a second one that would send
+	// the same events again.
+	private final AtomicBoolean flushInFlight = new AtomicBoolean();
+	// What the last loadout snapshot looked like, so an unchanged bank is not sent again. Banks
+	// barely move between openings, and a snapshot is the largest thing this plugin sends.
+	private volatile Integer lastLoadoutFingerprint;
 	private PendingPlayerTrade pendingPlayerTrade;
 	private boolean inTradeConfirmation;
 	private volatile String accountName = "Not logged in";
@@ -148,7 +177,17 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			return thread;
 		});
 		store = new LocalSyncStore(gson, RuneLite.RUNELITE_DIR.toPath(), ioExecutor);
-		submitIo("initialize local bridge", store::initialize);
+		syncClient = new SyncClient(okHttpClient);
+		applyConnectionSettings();
+		submitIo("initialize the outbox", store::initialize);
+		// Emptying the outbox is the only thing that actually reaches the service. Everything
+		// else this plugin records simply lands in it.
+		flushFuture = ioExecutor.scheduleWithFixedDelay(
+			() -> runIo("send queued events", this::flushOutbox),
+			FLUSH_SECONDS,
+			FLUSH_SECONDS,
+			TimeUnit.SECONDS
+		);
 		// A client can stay open for weeks, so housekeeping has to repeat rather than only run
 		// at start-up: the queue keeps growing the whole time the desktop app stays closed.
 		pruneFuture = ioExecutor.scheduleWithFixedDelay(
@@ -158,30 +197,15 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			TimeUnit.HOURS
 		);
 		heartbeatFuture = ioExecutor.scheduleWithFixedDelay(
-			() -> runIo(
-				"update connection status",
-				() ->
-				{
-					store.writeHeartbeat(accountHash, accountName, playerTradeTracking);
-					OfferScreen screen = offerScreen;
-					if (screen != null)
-					{
-						// Re-stamped rather than only written when it changes: the desktop app times
-						// this file out so a client that died with the box open cannot leave a
-						// highlight behind, which means a box left open for minutes has to keep
-						// saying it still is.
-						store.writeOfferScreen(accountHash, screen);
-					}
-				}
-			),
+			() -> runIo("say the plugin is still connected", this::sendHeartbeat),
 			0,
-			10,
+			HEARTBEAT_SECONDS,
 			TimeUnit.SECONDS
 		);
 		// Plugins are started on the Swing event thread, and who is logged in is the client's to
 		// answer, so the first reading has to be asked for on the thread that owns it.
 		clientThread.invokeLater(this::updateAccount);
-		log.debug("OSRS Toolkit local sync started");
+		log.debug("OSRS Toolkit sync started");
 	}
 
 	@Override
@@ -200,18 +224,15 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			pruneFuture.cancel(false);
 			pruneFuture = null;
 		}
-		// Queued rather than written here: plugins stop on the Swing event thread, and this is a
-		// file replace. The orderly shutdown below lets the queue drain on the background thread
-		// without holding up the caller, so the desktop app still hears that the box closed.
-		LocalSyncStore closingStore = store;
-		String closingAccountHash = accountHash;
-		if (closingStore != null)
+		if (flushFuture != null)
 		{
-			submitIo(
-				"clear the open offer screen",
-				() -> closingStore.writeOfferScreen(closingAccountHash, null)
-			);
+			flushFuture.cancel(false);
+			flushFuture = null;
 		}
+		// Told rather than left to time out. The request itself is handed to OkHttp's own pool,
+		// so nothing here waits on the network — plugins stop on the Swing event thread and that
+		// thread draws the client's own settings panel.
+		sendOfferScreen(accountHash, null);
 		offerScreen = null;
 		setupSide = null;
 		setupSideItemId = 0;
@@ -224,7 +245,8 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		}
 		pendingPlayerTrade = null;
 		inTradeConfirmation = false;
-		log.debug("OSRS Toolkit local sync stopped");
+		syncClient = null;
+		log.debug("OSRS Toolkit sync stopped");
 	}
 
 	@Subscribe
@@ -430,6 +452,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			return;
 		}
 		playerTradeTracking = config.trackPlayerTrades();
+		applyConnectionSettings();
 		// Config changes arrive on whichever thread made them, which for the settings panel is
 		// the Swing event thread. Everything below belongs to the client thread — the trade in
 		// progress and the offer box being watched are both written there on every tick — so it
@@ -457,6 +480,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			offers.remove(current.slot);
 			store.writeOfferState(eventAccountHash, offers);
+			sendOfferState(eventAccountHash, offers);
 			return;
 		}
 		if (current.continues(previous))
@@ -502,6 +526,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		}
 		offers.put(current.slot, current);
 		store.writeOfferState(eventAccountHash, offers);
+		sendOfferState(eventAccountHash, offers);
 	}
 
 	/**
@@ -529,10 +554,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		}
 		offerScreen = current;
 		String eventAccountHash = accountHash;
-		submitIo(
-			"record the open offer screen",
-			() -> store.writeOfferScreen(eventAccountHash, current)
-		);
+		sendOfferScreen(eventAccountHash, current);
 	}
 
 	/**
@@ -610,10 +632,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		}
 		offerScreen = null;
 		String eventAccountHash = accountHash;
-		submitIo(
-			"clear the open offer screen",
-			() -> store.writeOfferScreen(eventAccountHash, null)
-		);
+		sendOfferScreen(eventAccountHash, null);
 	}
 
 	private Map<Integer, OfferSnapshot> loadAccountOffers(String eventAccountHash) throws IOException
@@ -657,6 +676,17 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			}
 			skills.put(skill.getName(), client.getRealSkillLevel(skill));
 		}
+		// A bank barely moves between openings, and this is by far the largest thing the plugin
+		// sends — six figures of item names where everything else is a few hundred bytes. Sending
+		// one that says exactly what the last one said costs the player bandwidth to tell the
+		// desktop app something it already knows.
+		int fingerprint = loadoutFingerprint(equipment, inventory, bank, skills);
+		Integer previous = lastLoadoutFingerprint;
+		if (previous != null && previous == fingerprint)
+		{
+			return;
+		}
+		lastLoadoutFingerprint = fingerprint;
 		SyncEvent syncEvent = SyncEvent.loadoutSnapshot(
 			accountHash, accountName, equipment, inventory, bank, skills
 		);
@@ -788,6 +818,229 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			throw new IllegalStateException("SHA-256 is unavailable", ex);
 		}
+	}
+
+	/**
+	 * What the loadout holds, as one number.
+	 *
+	 * Item ids and counts only. Prices move on their own without the player touching anything,
+	 * and the desktop app has its own view of those anyway — resending a hundred kilobytes
+	 * because an item drifted a gp is not worth it. Computed by hand rather than by serialising
+	 * and hashing, because this runs on the client thread and building the JSON twice to find
+	 * out it was not needed is the very cost this is here to avoid.
+	 */
+	private static int loadoutFingerprint(List<SyncItem> equipment, List<SyncItem> inventory,
+		List<SyncItem> bank, Map<String, Integer> skills)
+	{
+		int result = 17;
+		for (List<SyncItem> items : List.of(equipment, inventory, bank))
+		{
+			result = result * 31 + items.size();
+			for (SyncItem item : items)
+			{
+				result = result * 31 + item.item_id;
+				result = result * 31 + item.quantity;
+			}
+		}
+		for (Map.Entry<String, Integer> skill : skills.entrySet())
+		{
+			result = result * 31 + skill.getKey().hashCode();
+			result = result * 31 + skill.getValue();
+		}
+		return result;
+	}
+
+	/** Point the client at whatever the settings now say, or at nothing while sync is off. */
+	private void applyConnectionSettings()
+	{
+		SyncClient client = syncClient;
+		if (client == null)
+		{
+			return;
+		}
+		if (!config.syncEnabled())
+		{
+			client.configure("", "");
+			return;
+		}
+		client.configure(config.serverUrl(), config.pairingToken());
+	}
+
+	/**
+	 * Empty the outbox.
+	 *
+	 * One batch in the air at a time: the timer is short enough that a slow request would
+	 * otherwise overlap the next pass, and both would read the same files and send them twice.
+	 * The service would discard the duplicates, but sending a bank snapshot twice over someone's
+	 * home connection to be told it was already there is worth avoiding.
+	 */
+	private void flushOutbox() throws IOException
+	{
+		SyncClient client = syncClient;
+		LocalSyncStore outbox = store;
+		if (client == null || outbox == null || !client.isConfigured())
+		{
+			return;
+		}
+		if (!flushInFlight.compareAndSet(false, true))
+		{
+			return;
+		}
+		boolean handedOff = false;
+		try
+		{
+			List<LocalSyncStore.PendingEvent> pending = outbox.readPendingEvents(flushBatchLimit);
+			if (pending.isEmpty())
+			{
+				return;
+			}
+			StringBuilder body = new StringBuilder("{\"events\":[");
+			List<Path> sending = new ArrayList<>();
+			int bytes = 0;
+			for (LocalSyncStore.PendingEvent event : pending)
+			{
+				// The byte budget is what actually binds. One loadout snapshot is most of it, so
+				// a batch is often a single event — but never zero, or an event larger than the
+				// budget would never leave the queue at all.
+				if (!sending.isEmpty() && bytes + event.json.length() > MAX_FLUSH_BYTES)
+				{
+					break;
+				}
+				if (!sending.isEmpty())
+				{
+					body.append(',');
+				}
+				body.append(event.json);
+				bytes += event.json.length();
+				sending.add(event.path);
+			}
+			body.append("]}");
+			int batchSize = sending.size();
+			client.send(
+				"v1/events",
+				body.toString(),
+				outcome -> onFlushed(outcome, sending, batchSize)
+			);
+			handedOff = true;
+		}
+		finally
+		{
+			if (!handedOff)
+			{
+				flushInFlight.set(false);
+			}
+		}
+	}
+
+	/**
+	 * What to do with the events a flush just carried. Runs on an OkHttp thread, so anything
+	 * touching the outbox is handed back to the thread that owns it.
+	 */
+	private void onFlushed(SyncClient.Outcome outcome, List<Path> sent, int batchSize)
+	{
+		try
+		{
+			if (outcome == SyncClient.Outcome.DELIVERED)
+			{
+				flushBatchLimit = MAX_EVENTS_PER_FLUSH;
+				submitIo("clear sent events", () -> deleteQueued(sent));
+				return;
+			}
+			if (outcome != SyncClient.Outcome.REFUSED)
+			{
+				// Offline, rate limited, or a token that needs fixing. All of them mean the
+				// events are still worth having, so nothing is deleted.
+				return;
+			}
+			if (batchSize == 1)
+			{
+				// One event the service will never accept. Kept any longer it blocks everything
+				// queued behind it, so it goes and the batch size returns to normal.
+				log.debug("Dropping an event the sync service refused");
+				submitIo("drop a refused event", () -> deleteQueued(sent));
+				flushBatchLimit = MAX_EVENTS_PER_FLUSH;
+				return;
+			}
+			// Something in the batch is unacceptable, but not necessarily all of it. Going one at
+			// a time from here means only the offending event is lost.
+			flushBatchLimit = 1;
+		}
+		finally
+		{
+			flushInFlight.set(false);
+		}
+	}
+
+	private void deleteQueued(List<Path> paths)
+	{
+		LocalSyncStore outbox = store;
+		if (outbox == null)
+		{
+			return;
+		}
+		for (Path path : paths)
+		{
+			outbox.deleteEvent(path);
+		}
+	}
+
+	private void sendHeartbeat()
+	{
+		SyncClient client = syncClient;
+		if (client == null || !client.isConfigured())
+		{
+			return;
+		}
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("account_hash", accountHash);
+		body.put("account_name", accountName);
+		body.put("player_trade_tracking", playerTradeTracking);
+		client.send("v1/heartbeat", gson.toJson(body), outcome -> { });
+	}
+
+	/**
+	 * Say where in the Grand Exchange the player is, or that they are no longer there.
+	 *
+	 * Sent straight out rather than queued, because it is a statement about this moment: an
+	 * offer box reported after sitting in a queue would point the desktop app at a screen the
+	 * player closed minutes ago. A failure is dropped for the same reason — by the time a retry
+	 * landed it would be describing the past.
+	 *
+	 * A null screen leaves the payload off the request entirely, which the service reads as
+	 * "clear it". Absence is still the message, exactly as a deleted file was.
+	 */
+	private void sendOfferScreen(String eventAccountHash, OfferScreen screen)
+	{
+		SyncClient client = syncClient;
+		if (client == null || !client.isConfigured())
+		{
+			return;
+		}
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("account_hash", eventAccountHash);
+		if (screen != null)
+		{
+			Map<String, Object> payload = new LinkedHashMap<>();
+			payload.put("item_id", screen.itemId);
+			payload.put("item_name", screen.itemName);
+			payload.put("side", screen.side);
+			body.put("payload", payload);
+		}
+		client.send("v1/state/screen", gson.toJson(body), outcome -> { });
+	}
+
+	/** The eight slots as they stand. Current state, so it goes straight out like the screen. */
+	private void sendOfferState(String eventAccountHash, Map<Integer, OfferSnapshot> offers)
+	{
+		SyncClient client = syncClient;
+		if (client == null || !client.isConfigured())
+		{
+			return;
+		}
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("account_hash", eventAccountHash);
+		body.put("payload", offers);
+		client.send("v1/state/offers", gson.toJson(body), outcome -> { });
 	}
 
 	private void submitIo(String action, IoAction work)
