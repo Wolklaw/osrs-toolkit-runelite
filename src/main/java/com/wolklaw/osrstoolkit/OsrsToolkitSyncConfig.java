@@ -43,14 +43,14 @@ public interface OsrsToolkitSyncConfig extends Config
 	@ConfigItem(
 		keyName = "serverUrl",
 		name = "Service address",
-		description = "The address of the OSRS Toolkit sync service, e.g. "
-			+ "https://sync.example.com. Set this to your own if you run the service yourself.",
+		description = "The address of the sync service. Leave this as it is unless you run the "
+			+ "service yourself, in which case point it at your own copy.",
 		section = connectionSection,
 		position = 1
 	)
 	default String serverUrl()
 	{
-		return "";
+		return "https://sync.runescope.app";
 	}
 
 	@ConfigItem(
