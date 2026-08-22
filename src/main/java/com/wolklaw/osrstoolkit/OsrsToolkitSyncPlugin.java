@@ -55,6 +55,7 @@ import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.Text;
 import okhttp3.OkHttpClient;
 
@@ -127,6 +128,11 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	@Inject
 	private OkHttpClient okHttpClient;
 
+	@Inject
+	private OverlayManager overlayManager;
+
+	private ConnectionOverlay connectionOverlay;
+
 	private final Map<String, Map<Integer, OfferSnapshot>> accountOffers = new HashMap<>();
 	private final Set<String> loadedAccounts = new HashSet<>();
 	// Assigned when the plugin starts and cleared when it stops, both on the Swing event thread,
@@ -165,11 +171,19 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	// it is what stops a side latched for the last item being reported for the next one.
 	private String setupSide;
 	private int setupSideItemId;
+	// Read by ConnectionOverlay on the Swing render thread, written from wherever a heartbeat or
+	// connection test last finished — an OkHttp callback thread most of the time. Null until the
+	// first attempt lands, which the overlay reads as "still waiting to hear back" rather than
+	// any of the failure states.
+	volatile SyncClient.Outcome lastConnectionOutcome;
 
 	@Override
 	protected void startUp()
 	{
 		playerTradeTracking = config.trackPlayerTrades();
+		lastConnectionOutcome = null;
+		connectionOverlay = new ConnectionOverlay(this, config);
+		overlayManager.add(connectionOverlay);
 		ioExecutor = Executors.newSingleThreadScheduledExecutor(runnable ->
 		{
 			Thread thread = new Thread(runnable, "osrs-toolkit-sync");
@@ -211,6 +225,11 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		if (connectionOverlay != null)
+		{
+			overlayManager.remove(connectionOverlay);
+			connectionOverlay = null;
+		}
 		// Cancelled without interrupting. A task caught mid-flight here is a file being replaced
 		// under a reader in the desktop app; letting it finish costs milliseconds on a background
 		// thread, while interrupting it can leave a scratch file behind for the sweep to find.
@@ -1004,7 +1023,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			return;
 		}
-		client.send("v1/heartbeat", heartbeatBody(), outcome -> { });
+		client.send("v1/heartbeat", heartbeatBody(), outcome -> lastConnectionOutcome = outcome);
 	}
 
 	/**
@@ -1052,6 +1071,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	 */
 	private void reportConnectionResult(SyncClient.Outcome outcome)
 	{
+		lastConnectionOutcome = outcome;
 		String message;
 		switch (outcome)
 		{

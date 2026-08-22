@@ -68,6 +68,20 @@ public interface OsrsToolkitSyncConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "showConnectionOverlay",
+		name = "Show connection status overlay",
+		description = "Show a small always-visible line saying whether the sync connection is "
+			+ "currently working, instead of only finding out when something you did should have "
+			+ "sent something.",
+		section = connectionSection,
+		position = 3
+	)
+	default boolean showConnectionOverlay()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "trackGrandExchange",
 		name = "Track Grand Exchange fills",
 		description = "Record completed and partial Grand Exchange fills for the OSRS Toolkit journal",
