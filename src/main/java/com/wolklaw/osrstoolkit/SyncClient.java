@@ -26,6 +26,18 @@ final class SyncClient
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
 	/**
+	 * Who is calling, said plainly.
+	 *
+	 * Not politeness. A CDN in front of the service decides what to let through partly on this,
+	 * and the default here is OkHttp's own name — a generic signature shared with every other
+	 * Java client on the internet, and one a blocklist could add tomorrow. The address this
+	 * plugin calls is compiled into installs that cannot be updated quickly, so being turned
+	 * away for looking generic would break every user at once with a fix that has to clear
+	 * Plugin Hub review first. A name of our own cannot be caught by that.
+	 */
+	private static final String USER_AGENT = "OSRS-Toolkit-Sync/1.0 (+https://runescope.app)";
+
+	/**
 	 * What became of one request. The distinction that matters is whether the payload is worth
 	 * sending again: a refused payload never will be, so keeping it would block the queue behind
 	 * it forever.
@@ -93,6 +105,7 @@ final class SyncClient
 		Request request = new Request.Builder()
 			.url(url.newBuilder().addPathSegments(path).build())
 			.header("Authorization", "Bearer " + pairingToken)
+			.header("User-Agent", USER_AGENT)
 			.header("Content-Encoding", "gzip")
 			.post(gzip(RequestBody.create(JSON, json)))
 			.build();
