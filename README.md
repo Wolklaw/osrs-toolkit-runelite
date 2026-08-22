@@ -44,7 +44,7 @@ is no account, no password and no email; a pairing token is the only identifier,
 stores only a hash of it.
 
 The endpoint contract is documented at
-[docs/sync-api.md](https://github.com/Wolklaw/OSRS-Toolkit/blob/main/docs/sync-api.md).
+[docs/sync-api.md](https://github.com/Wolklaw/OSRS-Toolkit/blob/fresh-main/docs/sync-api.md).
 
 ## Setting it up
 
