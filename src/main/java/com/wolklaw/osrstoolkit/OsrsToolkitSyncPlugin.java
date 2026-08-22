@@ -453,6 +453,19 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		}
 		playerTradeTracking = config.trackPlayerTrades();
 		applyConnectionSettings();
+		// Only when the address, token, or the toggle itself just changed — not on every field
+		// in this settings group, which would mean toggling "track player trades" alone also
+		// re-testing a connection nothing about it touched. This is what answers "does this
+		// work" the moment someone finishes typing, rather than on whatever the next scheduled
+		// heartbeat happens to be, up to a minute later.
+		if (
+			"syncEnabled".equals(event.getKey())
+			|| "serverUrl".equals(event.getKey())
+			|| "pairingToken".equals(event.getKey())
+		)
+		{
+			testConnectionAndReport();
+		}
 		// Config changes arrive on whichever thread made them, which for the settings panel is
 		// the Swing event thread. Everything below belongs to the client thread — the trade in
 		// progress and the offer box being watched are both written there on every tick — so it
@@ -991,11 +1004,71 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			return;
 		}
+		client.send("v1/heartbeat", heartbeatBody(), outcome -> { });
+	}
+
+	/**
+	 * Send one heartbeat right away and say in the chatbox what came back.
+	 *
+	 * The routine heartbeat runs silently every sixty seconds forever — fine for something
+	 * that is already working, and the wrong place to explain a failure nobody asked about
+	 * yet. This runs once, right when the settings panel gives a reason to ask "does this
+	 * work now", so the wait for an answer is however long one request takes rather than
+	 * however long is left until the next scheduled one.
+	 */
+	private void testConnectionAndReport()
+	{
+		SyncClient syncClientRef = syncClient;
+		if (syncClientRef == null)
+		{
+			return;
+		}
+		if (!syncClientRef.isConfigured())
+		{
+			// Not an error to report — an address or token still being typed is not yet a
+			// connection that failed, it is one that has not been asked to try.
+			return;
+		}
+		syncClientRef.send(
+			"v1/heartbeat",
+			heartbeatBody(),
+			outcome -> clientThread.invokeLater(() -> reportConnectionResult(outcome))
+		);
+	}
+
+	private String heartbeatBody()
+	{
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("account_hash", accountHash);
 		body.put("account_name", accountName);
 		body.put("player_trade_tracking", playerTradeTracking);
-		client.send("v1/heartbeat", gson.toJson(body), outcome -> { });
+		return gson.toJson(body);
+	}
+
+	/**
+	 * Say what a connection test found, once, in the chatbox — CONSOLE rather than a public
+	 * chat channel, so it reads the same as any other local client message and nobody but the
+	 * player sees it. This is the only place this plugin ever writes to the chatbox unprompted.
+	 */
+	private void reportConnectionResult(SyncClient.Outcome outcome)
+	{
+		String message;
+		switch (outcome)
+		{
+			case DELIVERED:
+				message = "OSRS Toolkit Sync: connected.";
+				break;
+			case UNAUTHORIZED:
+				message = "OSRS Toolkit Sync: that pairing token was not accepted.";
+				break;
+			case REFUSED:
+				message = "OSRS Toolkit Sync: the sync service refused the request.";
+				break;
+			default:
+				message = "OSRS Toolkit Sync: could not reach " + config.serverUrl() + ".";
+				break;
+		}
+		client.addChatMessage(ChatMessageType.CONSOLE, "", message, null);
 	}
 
 	/**
