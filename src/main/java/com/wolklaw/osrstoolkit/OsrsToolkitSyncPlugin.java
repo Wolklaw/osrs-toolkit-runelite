@@ -62,7 +62,6 @@ import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
-import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.Text;
 import okhttp3.OkHttpClient;
 
@@ -75,6 +74,10 @@ import okhttp3.OkHttpClient;
 )
 public class OsrsToolkitSyncPlugin extends Plugin
 {
+	/** Jagex colour tags for the two answers a connection test can give. */
+	private static final String GOOD = "<col=40c057>";
+	private static final String BAD = "<col=e2685f>";
+
 	private static final String ACCEPTED_TRADE = "Accepted trade.";
 	private static final String DECLINED_TRADE = "Other player declined trade.";
 	// RuneScape exposes the other player's offer as the trade container with this API flag. The
@@ -136,9 +139,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	private OkHttpClient okHttpClient;
 
 	@Inject
-	private OverlayManager overlayManager;
 
-	private ConnectionOverlay connectionOverlay;
 
 	private final Map<String, Map<Integer, OfferSnapshot>> accountOffers = new HashMap<>();
 	private final Set<String> loadedAccounts = new HashSet<>();
@@ -182,19 +183,10 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	// it is what stops a side latched for the last item being reported for the next one.
 	private String setupSide;
 	private int setupSideItemId;
-	// Read by ConnectionOverlay on the Swing render thread, written from wherever a heartbeat or
-	// connection test last finished — an OkHttp callback thread most of the time. Null until the
-	// first attempt lands, which the overlay reads as "still waiting to hear back" rather than
-	// any of the failure states.
-	volatile SyncClient.Outcome lastConnectionOutcome;
-
 	@Override
 	protected void startUp()
 	{
 		playerTradeTracking = config.trackPlayerTrades();
-		lastConnectionOutcome = null;
-		connectionOverlay = new ConnectionOverlay(this, config);
-		overlayManager.add(connectionOverlay);
 		ioExecutor = Executors.newSingleThreadScheduledExecutor(runnable ->
 		{
 			Thread thread = new Thread(runnable, "osrs-toolkit-sync");
@@ -236,11 +228,6 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
-		if (connectionOverlay != null)
-		{
-			overlayManager.remove(connectionOverlay);
-			connectionOverlay = null;
-		}
 		// Cancelled without interrupting. A task caught mid-flight here is a file being replaced
 		// under a reader in the desktop app; letting it finish costs milliseconds on a background
 		// thread, while interrupting it can leave a scratch file behind for the sweep to find.
@@ -545,7 +532,6 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		// heartbeat happens to be, up to a minute later.
 		if (
 			"syncEnabled".equals(event.getKey())
-			|| "serverUrl".equals(event.getKey())
 			|| "pairingToken".equals(event.getKey())
 		)
 		{
@@ -1012,7 +998,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			client.configure("", "");
 			return;
 		}
-		client.configure(config.serverUrl(), config.pairingToken());
+		client.configure(SyncClient.SERVICE_URL, config.pairingToken());
 	}
 
 	/**
@@ -1140,7 +1126,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			return;
 		}
-		client.send("v1/heartbeat", heartbeatBody(), outcome -> lastConnectionOutcome = outcome);
+		client.send("v1/heartbeat", heartbeatBody(), outcome -> { });
 	}
 
 	/**
@@ -1161,8 +1147,14 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		}
 		if (!syncClientRef.isConfigured())
 		{
-			// Not an error to report — an address or token still being typed is not yet a
-			// connection that failed, it is one that has not been asked to try.
+			// No token, so there is nothing to test. Silence would be the wrong answer while
+			// sync is switched on: that is someone who believes they have set this up, and the
+			// one thing still missing is the thing they would never guess at.
+			if (config.syncEnabled())
+			{
+				say(BAD, "no pairing token yet. Copy one from the Profile page on "
+					+ "runescope.app and paste it above.");
+			}
 			return;
 		}
 		syncClientRef.send(
@@ -1188,24 +1180,41 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	 */
 	private void reportConnectionResult(SyncClient.Outcome outcome)
 	{
-		lastConnectionOutcome = outcome;
-		String message;
 		switch (outcome)
 		{
 			case DELIVERED:
-				message = "OSRS Toolkit Sync: connected.";
+				say(GOOD, "pairing token accepted. This character is syncing.");
 				break;
 			case UNAUTHORIZED:
-				message = "OSRS Toolkit Sync: that pairing token was not accepted.";
+				say(BAD, "that pairing token was not accepted. Copy it again from the Profile "
+					+ "page on runescope.app.");
 				break;
 			case REFUSED:
-				message = "OSRS Toolkit Sync: the sync service refused the request.";
+				say(BAD, "the sync service refused that request.");
 				break;
 			default:
-				message = "OSRS Toolkit Sync: could not reach " + config.serverUrl() + ".";
+				say(BAD, "could not reach the sync service. Nothing is lost — what this plugin "
+					+ "records is kept and sent when the service comes back.");
 				break;
 		}
-		client.addChatMessage(ChatMessageType.CONSOLE, "", message, null);
+	}
+
+	/**
+	 * One line in the chatbox, under this plugin's name and in the colour of the answer.
+	 *
+	 * The colour is doing real work rather than decoration: this is the whole of the pairing
+	 * confirmation, because RuneLite's settings panel has no way to draw a tick beside a text
+	 * field, and a wall of identically grey console lines is where "did that work" goes to be
+	 * missed.
+	 */
+	private void say(String color, String message)
+	{
+		client.addChatMessage(
+			ChatMessageType.CONSOLE,
+			"",
+			"OSRS Toolkit Sync: " + color + message + "</col>",
+			null
+		);
 	}
 
 	/**
@@ -1236,7 +1245,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			payload.put("side", screen.side);
 			body.put("payload", payload);
 		}
-		client.send("v1/state/screen", gson.toJson(body), outcome -> { });
+		client.replace("v1/state/screen", gson.toJson(body), outcome -> { });
 	}
 
 	/** The eight slots as they stand. Current state, so it goes straight out like the screen. */
@@ -1250,7 +1259,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("account_hash", eventAccountHash);
 		body.put("payload", offers);
-		client.send("v1/state/offers", gson.toJson(body), outcome -> { });
+		client.replace("v1/state/offers", gson.toJson(body), outcome -> { });
 	}
 
 	private void submitIo(String action, IoAction work)

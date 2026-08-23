@@ -12,7 +12,7 @@ public interface OsrsToolkitSyncConfig extends Config
 
 	@ConfigSection(
 		name = "Connection",
-		description = "Where this plugin sends what it records, and the token that says it is yours",
+		description = "The token that says what this plugin records is yours",
 		position = 0
 	)
 	String connectionSection = "connection";
@@ -27,9 +27,9 @@ public interface OsrsToolkitSyncConfig extends Config
 	@ConfigItem(
 		keyName = "syncEnabled",
 		name = "Send to OSRS Toolkit Sync",
-		description = "Send what this plugin records to the OSRS Toolkit sync service so the "
-			+ "desktop app can import it. Nothing is sent until this is on and both the address "
-			+ "and token below are filled in.",
+		description = "Send what this plugin records to the OSRS Toolkit sync service, so "
+			+ "runescope.app can show it. Nothing is sent until this is on and a pairing token "
+			+ "is filled in below.",
 		warning = "This feature submits your IP address to a 3rd-party server not controlled or "
 			+ "verified by RuneLite developers",
 		section = connectionSection,
@@ -41,44 +41,18 @@ public interface OsrsToolkitSyncConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "serverUrl",
-		name = "Service address",
-		description = "The address of the sync service. Leave this as it is unless you run the "
-			+ "service yourself, in which case point it at your own copy.",
-		section = connectionSection,
-		position = 1
-	)
-	default String serverUrl()
-	{
-		return "https://sync.runescope.app";
-	}
-
-	@ConfigItem(
 		keyName = "pairingToken",
 		name = "Pairing token",
-		description = "The token the sync service issued you. The desktop app shows the same one. "
-			+ "It identifies your queue and nothing else.",
+		description = "The token from your Profile page on runescope.app. Paste it here and "
+			+ "this plugin says in the chatbox whether it was accepted. It identifies your "
+			+ "queue and nothing else.",
 		secret = true,
 		section = connectionSection,
-		position = 2
+		position = 1
 	)
 	default String pairingToken()
 	{
 		return "";
-	}
-
-	@ConfigItem(
-		keyName = "showConnectionOverlay",
-		name = "Show connection status overlay",
-		description = "Show a small always-visible line saying whether the sync connection is "
-			+ "currently working, instead of only finding out when something you did should have "
-			+ "sent something.",
-		section = connectionSection,
-		position = 3
-	)
-	default boolean showConnectionOverlay()
-	{
-		return true;
 	}
 
 	@ConfigItem(

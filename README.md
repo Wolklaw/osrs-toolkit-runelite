@@ -8,7 +8,7 @@ time of the trade. Player-to-player trade tracking, PvM gear/bank sync, NPC loot
 all available as optional, off-by-default settings.
 
 **The plugin sends nothing until you turn it on.** Sync is off by default, and even switched on
-it does nothing until you give it a service address and a pairing token.
+it does nothing until you give it a pairing token.
 
 ## What it records
 
@@ -54,10 +54,10 @@ The endpoint contract is documented at
 
 ## Setting it up
 
-1. Get a pairing token from your sync service, or from the desktop app's Support tab.
+1. Get a pairing token from your Profile page on [runescope.app](https://runescope.app).
 2. In RuneLite, open this plugin's settings.
-3. Fill in **Service address** and **Pairing token**, then switch on **Send to OSRS Toolkit
-   Sync**.
+3. Paste it into **Pairing token**, then switch on **Send to OSRS Toolkit Sync**. The plugin
+   says in the chatbox whether the token was accepted.
 4. Enter the same token in the desktop app.
 
 ## If the service is unreachable

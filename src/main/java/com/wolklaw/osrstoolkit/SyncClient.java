@@ -26,6 +26,17 @@ final class SyncClient
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
 	/**
+	 * Where the service lives.
+	 *
+	 * Compiled in rather than configurable. It was a setting once, on the reasoning that
+	 * somebody running their own copy would want to point at it — but the server is open
+	 * source, so anyone running their own copy is already building from source and can change
+	 * this line. What a settings field actually bought was a way for everyone else to break
+	 * their own sync with a typo, in a field they had no reason to touch.
+	 */
+	static final String SERVICE_URL = "https://sync.runescope.app";
+
+	/**
 	 * Who is calling, said plainly.
 	 *
 	 * Not politeness. A CDN in front of the service decides what to let through partly on this,
@@ -93,7 +104,26 @@ final class SyncClient
 		return baseUrl != null && !token.isEmpty();
 	}
 
+	/** Add to something the service is collecting: events, heartbeats. */
 	void send(String path, String json, Callback callback)
+	{
+		dispatch("POST", path, json, callback);
+	}
+
+	/**
+	 * Overwrite the one copy the service keeps: the slots, the open offer box.
+	 *
+	 * PUT rather than POST because the service routes on the verb and answers a POST to these
+	 * paths with 405 - which {@link #outcomeOf} reads as a payload that will never be accepted,
+	 * so it is dropped rather than retried. Live state then disappears in silence, while the
+	 * heartbeat on the same client keeps reporting a healthy connection.
+	 */
+	void replace(String path, String json, Callback callback)
+	{
+		dispatch("PUT", path, json, callback);
+	}
+
+	private void dispatch(String method, String path, String json, Callback callback)
 	{
 		HttpUrl url = baseUrl;
 		String pairingToken = token;
@@ -107,7 +137,7 @@ final class SyncClient
 			.header("Authorization", "Bearer " + pairingToken)
 			.header("User-Agent", USER_AGENT)
 			.header("Content-Encoding", "gzip")
-			.post(gzip(RequestBody.create(JSON, json)))
+			.method(method, gzip(RequestBody.create(JSON, json)))
 			.build();
 		httpClient.newCall(request).enqueue(new okhttp3.Callback()
 		{
