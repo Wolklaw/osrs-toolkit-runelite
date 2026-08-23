@@ -138,9 +138,6 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	@Inject
 	private OkHttpClient okHttpClient;
 
-	@Inject
-
-
 	private final Map<String, Map<Integer, OfferSnapshot>> accountOffers = new HashMap<>();
 	private final Set<String> loadedAccounts = new HashSet<>();
 	// Assigned when the plugin starts and cleared when it stops, both on the Swing event thread,
