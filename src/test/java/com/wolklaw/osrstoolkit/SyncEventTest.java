@@ -157,4 +157,38 @@ public class SyncEventTest
 		assertTrue(payload.bank.get(0).unit_value > 0);
 		assertNotNull(event.event_id);
 	}
+
+	@Test
+	public void createsNpcLootWithTheNpcNameAndItems()
+	{
+		List<SyncItem> items = Collections.singletonList(new SyncItem(11_802, "Armadyl godsword", 1, 40_000_000));
+
+		SyncEvent event = SyncEvent.npcLoot("account-hash", "Tester", "Zulrah", items);
+		NpcLootPayload payload = (NpcLootPayload) event.payload;
+
+		assertEquals(1, event.schema_version);
+		assertEquals("npc_loot", event.event_type);
+		assertEquals("account-hash", event.account.hash);
+		assertEquals("Zulrah", payload.npc_name);
+		assertEquals(1, payload.items.size());
+		assertEquals(40_000_000, payload.items.get(0).unit_value);
+		assertNotNull(event.event_id);
+	}
+
+	@Test
+	public void createsPlayerDeathWithEquipmentInventoryAndSkullState()
+	{
+		List<SyncItem> equipment = Collections.singletonList(new SyncItem(11_802, "Armadyl godsword", 1, 40_000_000));
+		List<SyncItem> inventory = Collections.singletonList(new SyncItem(995, "Coins", 250_000, 1));
+
+		SyncEvent event = SyncEvent.playerDeath("account-hash", "Tester", true, equipment, inventory);
+		PlayerDeathPayload payload = (PlayerDeathPayload) event.payload;
+
+		assertEquals("player_death", event.event_type);
+		assertTrue(payload.skulled);
+		assertEquals(1, payload.equipment.size());
+		assertEquals(1, payload.inventory.size());
+		assertEquals(250_000, payload.inventory.get(0).quantity);
+		assertNotNull(event.event_id);
+	}
 }

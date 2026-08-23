@@ -4,8 +4,8 @@ RuneLite companion plugin for [OSRS Toolkit](https://github.com/Wolklaw/OSRS-Too
 
 It records Grand Exchange fills while RuneLite is running and sends them to the OSRS Toolkit
 sync service, so the desktop app's Trade Journal has them — even when the app was closed at the
-time of the trade. Player-to-player trade tracking and PvM gear/bank sync are both available as
-optional, off-by-default settings.
+time of the trade. Player-to-player trade tracking, PvM gear/bank sync, NPC loot, and deaths are
+all available as optional, off-by-default settings.
 
 **The plugin sends nothing until you turn it on.** Sync is off by default, and even switched on
 it does nothing until you give it a service address and a pairing token.
@@ -29,6 +29,12 @@ it does nothing until you give it a service address and a pairing token.
   levels each time you open your bank — used by the desktop app's PvM Readiness page. Snapshots
   are throttled, skipped entirely when nothing has changed since the last one, and a very large
   bank is trimmed to its most valuable 1,200 stacks.
+- When explicitly enabled, the items an NPC drops when you kill it — the name and value of every
+  stack, so the desktop app can total up what a PvM trip actually paid.
+- When explicitly enabled, what you had equipped and in your inventory the moment you died, plus
+  whether you were skulled. Not a computed loss — OSRS decides what survives a death by rules
+  this plugin does not simulate (skull state, Protect Item, wilderness) — just what was on you
+  at the time, for the desktop app to weigh against what a trip paid.
 
 It does not request credentials, automate game actions, click interfaces, or alter offers.
 

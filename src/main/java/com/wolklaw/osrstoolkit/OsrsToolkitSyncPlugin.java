@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -31,8 +32,11 @@ import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
+import net.runelite.api.NPC;
 import net.runelite.api.Player;
 import net.runelite.api.Skill;
+import net.runelite.api.SkullIcon;
+import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
@@ -41,6 +45,7 @@ import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.ScriptCallbackEvent;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
+import net.runelite.api.gameval.AnimationID;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.ItemID;
@@ -52,7 +57,9 @@ import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.events.NpcLootReceived;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.ItemStack;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.overlay.OverlayManager;
@@ -62,9 +69,9 @@ import okhttp3.OkHttpClient;
 @Slf4j
 @PluginDescriptor(
 	name = "OSRS Toolkit Sync",
-	description = "Sends GE fills, optional player trades, and optional PvM loadout snapshots "
-		+ "to the OSRS Toolkit sync service for the desktop app to import",
-	tags = {"trade", "grand exchange", "journal", "tracker", "flipping", "pvm", "bank"}
+	description = "Sends GE fills, and optionally player trades, PvM loadout snapshots, NPC "
+		+ "loot and deaths, to the OSRS Toolkit sync service for the desktop app to import",
+	tags = {"trade", "grand exchange", "journal", "tracker", "flipping", "pvm", "bank", "loot", "death"}
 )
 public class OsrsToolkitSyncPlugin extends Plugin
 {
@@ -155,6 +162,10 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	private volatile Integer lastLoadoutFingerprint;
 	private PendingPlayerTrade pendingPlayerTrade;
 	private boolean inTradeConfirmation;
+	// Read on the client thread only, alongside the animation change it is comparing against.
+	// Marks the death animation's rising edge so one death is reported once rather than on every
+	// tick the animation continues to play.
+	private boolean lastAnimationWasDeath;
 	private volatile String accountName = "Not logged in";
 	private volatile String accountHash = "unknown";
 	private volatile boolean playerTradeTracking;
@@ -464,6 +475,61 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	}
 
 	@Subscribe
+	public void onNpcLootReceived(NpcLootReceived event)
+	{
+		if (!config.trackLoot())
+		{
+			return;
+		}
+		updateAccount();
+		if ("unknown".equals(accountHash))
+		{
+			return;
+		}
+		List<SyncItem> items = toLootItems(event.getItems());
+		if (items.isEmpty())
+		{
+			return;
+		}
+		NPC npc = event.getNpc();
+		String npcName = npc.getName() == null ? "Unknown NPC" : npc.getName();
+		String eventAccountHash = accountHash;
+		String eventAccountName = accountName;
+		submitIo(
+			"record NPC loot",
+			() -> store.writeEvent(SyncEvent.npcLoot(eventAccountHash, eventAccountName, npcName, items))
+		);
+	}
+
+	/**
+	 * Notice the local player's death animation starting, and record what they were carrying.
+	 *
+	 * There is no death event in the client API this plugin builds against, so the animation is
+	 * the only signal — {@code AnimationChanged} fires for any actor whose animation changes, and
+	 * the death animation itself is a normal {@code Actor} animation like any other. Gated on the
+	 * rising edge so the multi-tick death animation is reported once, not on every tick it plays.
+	 */
+	@Subscribe
+	public void onAnimationChanged(AnimationChanged event)
+	{
+		if (!config.trackDeaths())
+		{
+			return;
+		}
+		Player localPlayer = client.getLocalPlayer();
+		if (localPlayer == null || event.getActor() != localPlayer)
+		{
+			return;
+		}
+		boolean isDeathAnimation = localPlayer.getAnimation() == AnimationID.HUMAN_DEATH;
+		if (isDeathAnimation && !lastAnimationWasDeath)
+		{
+			recordDeath();
+		}
+		lastAnimationWasDeath = isDeathAnimation;
+	}
+
+	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
 		if (!OsrsToolkitSyncConfig.GROUP.equals(event.getGroup()))
@@ -756,6 +822,54 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		return result;
 	}
 
+	private List<SyncItem> toLootItems(Collection<ItemStack> stacks)
+	{
+		List<SyncItem> result = new ArrayList<>();
+		for (ItemStack stack : stacks)
+		{
+			if (stack.getId() <= 0 || stack.getQuantity() <= 0)
+			{
+				continue;
+			}
+			ItemComposition composition = client.getItemDefinition(stack.getId());
+			String name = composition == null ? "Unknown item" : composition.getName();
+			int unitValue = stack.getId() == ItemID.COINS
+				? 1
+				: Math.max(0, itemManager.getItemPrice(stack.getId()));
+			result.add(new SyncItem(stack.getId(), name, stack.getQuantity(), unitValue));
+		}
+		return result;
+	}
+
+	/**
+	 * Record what the character had equipped and carried at the moment they died.
+	 *
+	 * Not what was lost — which tradeable items survive depends on skull state, Protect Item, and
+	 * whether death happened in the wilderness, rules this plugin does not simulate. The skulled
+	 * flag is sent alongside so the desktop app has at least that much of the picture without
+	 * having to guess it from the items themselves.
+	 */
+	private void recordDeath()
+	{
+		updateAccount();
+		if ("unknown".equals(accountHash))
+		{
+			return;
+		}
+		List<SyncItem> equipment = containerItems(InventoryID.WORN);
+		List<SyncItem> inventory = containerItems(InventoryID.INV);
+		Player localPlayer = client.getLocalPlayer();
+		boolean skulled = localPlayer != null && localPlayer.getSkullIcon() != SkullIcon.NONE;
+		String eventAccountHash = accountHash;
+		String eventAccountName = accountName;
+		submitIo(
+			"record death",
+			() -> store.writeEvent(
+				SyncEvent.playerDeath(eventAccountHash, eventAccountName, skulled, equipment, inventory)
+			)
+		);
+	}
+
 	private void pruneLocalFiles() throws IOException
 	{
 		store.pruneStaleEvents(Duration.ofDays(30), 20_000);
@@ -820,6 +934,9 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	{
 		accountName = "Not logged in";
 		accountHash = "unknown";
+		// A fresh login always starts outside the death animation, and the character it belonged
+		// to may not even be the one now controlled by this client.
+		lastAnimationWasDeath = false;
 	}
 
 	/**

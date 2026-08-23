@@ -70,6 +70,26 @@ final class SyncEvent
 			new LoadoutSnapshotPayload(equipment, inventory, bank, skills)
 		);
 	}
+
+	static SyncEvent npcLoot(String accountHash, String accountName, String npcName,
+		List<SyncItem> items)
+	{
+		return new SyncEvent(
+			"npc_loot",
+			new SyncAccount(accountHash, accountName),
+			new NpcLootPayload(npcName, items)
+		);
+	}
+
+	static SyncEvent playerDeath(String accountHash, String accountName, boolean skulled,
+		List<SyncItem> equipment, List<SyncItem> inventory)
+	{
+		return new SyncEvent(
+			"player_death",
+			new SyncAccount(accountHash, accountName),
+			new PlayerDeathPayload(skulled, equipment, inventory)
+		);
+	}
 }
 
 final class SyncAccount
@@ -200,6 +220,38 @@ final class LoadoutSnapshotPayload
 		this.inventory = inventory;
 		this.bank = bank;
 		this.skills = skills;
+	}
+}
+
+final class NpcLootPayload
+{
+	final String npc_name;
+	final List<SyncItem> items;
+
+	NpcLootPayload(String npcName, List<SyncItem> items)
+	{
+		this.npc_name = npcName;
+		this.items = items;
+	}
+}
+
+/**
+ * What was on the character at the moment they died — not what was lost. Which tradeable items
+ * are actually kept depends on skull state, Protect Item, and whether the death happened in the
+ * wilderness, rules this plugin does not simulate; the desktop app has both this snapshot and
+ * the loadout taken after, and can diff them itself if it wants an exact loss.
+ */
+final class PlayerDeathPayload
+{
+	final boolean skulled;
+	final List<SyncItem> equipment;
+	final List<SyncItem> inventory;
+
+	PlayerDeathPayload(boolean skulled, List<SyncItem> equipment, List<SyncItem> inventory)
+	{
+		this.skulled = skulled;
+		this.equipment = equipment;
+		this.inventory = inventory;
 	}
 }
 

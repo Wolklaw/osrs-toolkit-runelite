@@ -118,4 +118,30 @@ public interface OsrsToolkitSyncConfig extends Config
 	{
 		return false;
 	}
+
+	@ConfigItem(
+		keyName = "trackLoot",
+		name = "Track valuable loot",
+		description = "Record the items an NPC drops when you kill it, so the desktop app can "
+			+ "show what a PvM trip actually paid.",
+		section = recordingSection,
+		position = 3
+	)
+	default boolean trackLoot()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "trackDeaths",
+		name = "Track deaths",
+		description = "When you die, record the gear and inventory you had on you, so the "
+			+ "desktop app can show what a PvM trip put at risk.",
+		section = recordingSection,
+		position = 4
+	)
+	default boolean trackDeaths()
+	{
+		return false;
+	}
 }
