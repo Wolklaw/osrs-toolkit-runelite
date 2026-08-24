@@ -25,6 +25,23 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 
+/**
+ * This plugin's own files under {@code .runelite/osrs-toolkit/}, read by nothing but this
+ * plugin.
+ *
+ * {@code events/} is a network outbox: a fill written here goes out over HTTPS the moment
+ * {@link SyncClient} can reach the service, and the file is deleted only once the service has
+ * said it holds the event. It exists so a fill recorded while offline, or right before the
+ * client closes, is not lost — the alternative to writing it somewhere is losing it outright,
+ * not sending it more directly.
+ *
+ * {@code state/} is this plugin's own memory of the eight Grand Exchange slots, read back by
+ * {@link #readOfferState} the next time RuneLite starts so a fill can still be measured as a
+ * delta against an offer that has been open for hours. Older versions of this plugin let the
+ * desktop app read this same file directly; that arrangement is what the RuneLite Plugin Hub
+ * refused a submission for, and it no longer exists on either side — the desktop app reads
+ * live state through the website now, never this folder.
+ */
 @Slf4j
 final class LocalSyncStore
 {
@@ -305,12 +322,15 @@ final class LocalSyncStore
 	/**
 	 * Replace a file's contents in one step, retrying a moment later if the filesystem refuses.
 	 *
-	 * Windows denies the replacement outright while another process has the destination open,
-	 * and the desktop app reads the offer-state file whenever it redraws the Grand Exchange
-	 * slots — so a write can collide with a reader for no reason but timing. Losing one leaves
-	 * the saved offers behind the real ones, and the next client to start diffs live offers
-	 * against that stale picture: an offer it has been following for hours looks brand new.
-	 * A short wait outlives the reader, and the write lands on the second or third try.
+	 * Windows denies the replacement outright while another process has the destination open —
+	 * antivirus scanning it, an indexer, a backup tool, someone's own text editor — so a write
+	 * can collide with a reader for no reason but timing. This file is not shared with anything
+	 * else this plugin talks to over the network; the only reader that matters to correctness
+	 * is this same plugin's own {@link #readOfferState}, on the next RuneLite start. Losing a
+	 * write there leaves the saved offers behind the real ones, and the next client to start
+	 * diffs live offers against that stale picture: an offer it has been following for hours
+	 * looks brand new. A short wait outlives whatever briefly held the file, and the write
+	 * lands on the second or third try.
 	 *
 	 * The first attempt happens inline; a contested attempt is retried by rescheduling itself
 	 * on the same background executor rather than blocking that thread, so one contested write
