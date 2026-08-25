@@ -17,14 +17,14 @@ def runeLiteVersion = 'latest.release'
 def pluginMainClass = 'com.wolklaw.osrstoolkit.OsrsToolkitSyncPluginTest'
 
 dependencies {
-	compileOnly group: 'net.runelite', name:'client', version: runeLiteVersion
+	compileOnly "net.runelite:client:${runeLiteVersion}"
 
 	compileOnly 'org.projectlombok:lombok:1.18.30'
 	annotationProcessor 'org.projectlombok:lombok:1.18.30'
 
 	testImplementation 'junit:junit:4.12'
-	testImplementation group: 'net.runelite', name:'client', version: runeLiteVersion
-	testImplementation group: 'net.runelite', name:'jshell', version: runeLiteVersion
+	testImplementation "net.runelite:client:${runeLiteVersion}"
+	testImplementation "net.runelite:jshell:${runeLiteVersion}"
 }
 
 group = 'com.wolklaw.osrstoolkit'
