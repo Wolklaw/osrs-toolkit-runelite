@@ -80,43 +80,31 @@ public class OsrsToolkitSyncPlugin extends Plugin
 
 	private static final String ACCEPTED_TRADE = "Accepted trade.";
 	private static final String DECLINED_TRADE = "Other player declined trade.";
-	// RuneScape exposes the other player's offer as the trade container with this API flag. The
-	// legacy net.runelite.api.InventoryID enum spells the same pairing out as
-	// TRADEOTHER(90 | 0x8000); net.runelite.api.gameval has a constant for the container but
-	// none for the flagged form, so it has to be combined here.
+	// gameval has a constant for the trade container but none for the flagged form the other
+	// player's side uses, so it is combined here. Legacy InventoryID spelled it TRADEOTHER.
 	private static final int OTHER_PLAYER_CONTAINER = InventoryID.TRADEOFFER | 0x8000;
 	// Bank contents can change many times in a row while shuffling items around; only snapshot
 	// at most this often so a busy banking session doesn't flood the local event queue.
 	private static final long LOADOUT_SNAPSHOT_MIN_INTERVAL_MS = 3_000;
-	// The desktop app refuses a loadout list longer than this, and refusing one list throws away
-	// the whole snapshot — gear, inventory and skills with it. A full bank is well past the limit,
-	// so trim here rather than let the desktop app silently drop everything.
+	// The desktop app refuses a longer list, and one refusal throws away the whole snapshot —
+	// gear, inventory and skills with it. A full bank is well past this, so trim here.
 	private static final int MAX_SYNCED_CONTAINER_ITEMS = 1_200;
-	// The item the "Set up offer" box is showing. RuneLite's own Grand Exchange plugin reads this
-	// same var to know what its "Buy limit: …" line is about, which is that box and nothing else.
-	// The older API called it CURRENT_GE_ITEM; gameval names it after the trading post search.
+	// The item the "Set up offer" box is showing. Named after the trading post search in
+	// gameval; the older API called it CURRENT_GE_ITEM.
 	private static final int GE_SETUP_ITEM_VARP = VarPlayerID.TRADINGPOST_SEARCH;
-	// Which side the box is set up for. Zero is a buy: RuneLite's own item-stats plugin puts
-	// equipment stats on the offer box only while this reads zero, and stats are what you weigh
-	// before buying something, not before selling something already yours.
+	// Which side the box is set up for. Zero is a buy.
 	private static final int GE_SETUP_SIDE_VARBIT = VarbitID.GE_NEWOFFER_TYPE;
 	private static final int GE_SETUP_SIDE_BUY = 0;
-	// The box's examine line is drawn by one of two scripts named after the side being offered,
-	// which is the only place the interface says buy or sell in so many words. Preferred over the
-	// var above where it has fired for the item in hand; RuneLite's Grand Exchange plugin tells
-	// the two sides apart this same way.
-	// How often the plugin says "still here" when it has had nothing else to send. Liveness is
-	// otherwise derived from any request at all, so this only has to be often enough that a
-	// player sitting still does not read as disconnected.
+	// Often enough that a player sitting still does not read as disconnected.
 	private static final long HEARTBEAT_SECONDS = 60;
-	// How often the outbox is emptied. Short, because a fill the player just made is the thing
-	// the desktop app most wants promptly; a pass over an empty directory costs nothing.
 	private static final long FLUSH_SECONDS = 5;
-	// Ceilings on one batch. The count matches what the service accepts; the byte budget is the
-	// one that actually binds, because a loadout snapshot runs to six figures and a hundred of
-	// them would be refused outright for exceeding the body limit.
+	// The byte budget is the one that binds: a loadout snapshot runs to six figures, and a
+	// hundred of them would be refused outright for exceeding the service's body limit.
 	private static final int MAX_EVENTS_PER_FLUSH = 100;
 	private static final int MAX_FLUSH_BYTES = 512 * 1024;
+	// The examine line is drawn by one of two scripts named after the side being offered — the
+	// only place the interface says buy or sell outright. RuneLite's own Grand Exchange plugin
+	// tells the two apart this same way.
 	private static final String BUY_EXAMINE_CALLBACK = "geBuyExamineText";
 	private static final String SELL_EXAMINE_CALLBACK = "geSellExamineText";
 	// The status line this plugin writes to. Named here because onConfigChanged has to ignore
@@ -147,9 +135,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 
 	private final Map<String, Map<Integer, OfferSnapshot>> accountOffers = new HashMap<>();
 	private final Set<String> loadedAccounts = new HashSet<>();
-	// Assigned when the plugin starts and cleared when it stops, both on the Swing event thread,
-	// but read from the client thread on every tick that queues work. Volatile so the client
-	// thread cannot be handed a stale view of either.
+	// Written on the Swing thread at start and stop, read from the client thread every tick.
 	private volatile ScheduledExecutorService ioExecutor;
 	private ScheduledFuture<?> heartbeatFuture;
 	private ScheduledFuture<?> pruneFuture;
@@ -627,12 +613,9 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	 * Notice the "Set up offer" box opening, closing, or changing what it is on, and tell the
 	 * desktop app when it does.
 	 *
-	 * Polled on the tick rather than driven by an event, because there is no one event to drive
-	 * it from: the box is a panel inside an interface that is already loaded, the var holding
-	 * its item keeps the last thing picked long after the interface is gone, and the script that
-	 * names the side only runs when the examine line is redrawn. Reading all three together once
-	 * a tick is both the simplest way to be right and cheap enough not to matter — and the write
-	 * only happens on the ticks where the answer actually moved.
+	 * Polled on the tick because no single event covers it: the box is a panel inside an already
+	 * loaded interface, the var holding its item outlives that interface, and the script naming
+	 * the side only runs on a redraw. The write happens only on ticks where the answer moved.
 	 */
 	private void refreshOfferScreen()
 	{
@@ -654,16 +637,12 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	/**
 	 * Where in the Grand Exchange the player is, or null when they are not in it at all.
 	 *
-	 * Two answers, because a trade is a session rather than a moment. Standing anywhere in the
-	 * interface is worth saying on its own — an offer placed a minute ago is still the thing
-	 * being worked on while it fills and while it is collected, and the desktop app can pair
-	 * that with the slots it already reads. On top of that, the "Set up offer" box open on a
-	 * chosen item is worth saying precisely, because that is the one screen with two empty boxes
-	 * waiting to be typed into. An item of zero is the first answer without the second.
+	 * Two answers: standing anywhere in the interface, and the "Set up offer" box open on a
+	 * chosen item. An item of zero is the first without the second.
 	 *
-	 * Gated on the panels actually being on screen and not merely existing, because the var
-	 * holding the chosen item outlives the interface by a long way: read on its own it would
-	 * leave the desktop app pointing at a row the player walked away from an hour ago.
+	 * Gated on the panels being on screen rather than merely existing — the var holding the
+	 * chosen item outlives the interface, and would leave the desktop app pointing at a row the
+	 * player walked away from an hour ago.
 	 */
 	private OfferScreen readOfferScreen()
 	{
@@ -954,11 +933,9 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	/**
 	 * A stable filename for an account's state, derived from the public display name.
 	 *
-	 * Hashed rather than used directly because a display name can hold spaces and characters no
-	 * filesystem wants, and because the name of the character being played has no business
-	 * sitting in a directory listing. No credential is involved and nothing here is secret: the
-	 * display name is shown to everyone standing nearby, and the digest exists to make one short
-	 * filesystem-safe token out of it, not to protect anything.
+	 * Hashed because a display name can hold characters no filesystem wants, and because the
+	 * character being played has no business sitting in a directory listing. Nothing here is
+	 * secret — the digest is for a filesystem-safe token, not to protect anything.
 	 */
 	private static String hashAccountName(String name)
 	{
@@ -984,11 +961,9 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	/**
 	 * What the loadout holds, as one number.
 	 *
-	 * Item ids and counts only. Prices move on their own without the player touching anything,
-	 * and the desktop app has its own view of those anyway — resending a hundred kilobytes
-	 * because an item drifted a gp is not worth it. Computed by hand rather than by serialising
-	 * and hashing, because this runs on the client thread and building the JSON twice to find
-	 * out it was not needed is the very cost this is here to avoid.
+	 * Item ids and counts only: prices drift on their own, and resending a hundred kilobytes
+	 * over a gp is not worth it. Computed by hand rather than by serialising and hashing, since
+	 * building the JSON twice is the cost this exists to avoid.
 	 */
 	private static int loadoutFingerprint(List<SyncItem> equipment, List<SyncItem> inventory,
 		List<SyncItem> bank, Map<String, Integer> skills)
@@ -1158,11 +1133,8 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	/**
 	 * Send one heartbeat right away and say in the chatbox what came back.
 	 *
-	 * The routine heartbeat runs silently every sixty seconds forever — fine for something
-	 * that is already working, and the wrong place to explain a failure nobody asked about
-	 * yet. This runs once, right when the settings panel gives a reason to ask "does this
-	 * work now", so the wait for an answer is however long one request takes rather than
-	 * however long is left until the next scheduled one.
+	 * The routine heartbeat is silent and up to a minute away. This runs the moment the settings
+	 * panel gives a reason to ask "does this work now".
 	 */
 	private void testConnectionAndReport()
 	{
@@ -1260,13 +1232,11 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	/**
 	 * Put one line in the settings panel saying where the connection stands.
 	 *
-	 * The chatbox alone was not enough. It does not exist at the login screen, which is where
-	 * a plugin is usually set up, and the field the token goes into is a password field -- so
-	 * pasting showed a row of dots and then, quite often, nothing at all. This says the same
-	 * thing in the panel the token was pasted into, logged in or not.
+	 * The chatbox does not exist at the login screen, where a plugin is usually set up, and the
+	 * token field is a password field — so pasting showed dots and then nothing. This reads the
+	 * same logged in or not.
 	 *
-	 * Written only when the answer actually changes: every write is a config write, and the
-	 * routine heartbeat would otherwise re-save the same sentence once a minute forever.
+	 * Written only on change, or the minute heartbeat would re-save the same sentence forever.
 	 */
 	private void setStatus(String status)
 	{
@@ -1280,10 +1250,8 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	/**
 	 * Say where in the Grand Exchange the player is, or that they are no longer there.
 	 *
-	 * Sent straight out rather than queued, because it is a statement about this moment: an
-	 * offer box reported after sitting in a queue would point the desktop app at a screen the
-	 * player closed minutes ago. A failure is dropped for the same reason — by the time a retry
-	 * landed it would be describing the past.
+	 * Sent straight out rather than queued: it describes this moment, so a retry would only
+	 * point the desktop app at a screen the player closed minutes ago.
 	 *
 	 * A null screen leaves the payload off the request entirely, which the service reads as
 	 * "clear it". Absence is still the message, exactly as a deleted file was.

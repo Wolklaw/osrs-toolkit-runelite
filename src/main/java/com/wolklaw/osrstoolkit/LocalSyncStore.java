@@ -27,21 +27,15 @@ import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * This plugin's own files under {@code .runelite/osrs-toolkit/}, read by nothing but this
- * plugin.
+ * This plugin's own files under {@code .runelite/osrs-toolkit/}, read by nothing else.
  *
- * {@code events/} is a network outbox: a fill written here goes out over HTTPS the moment
- * {@link SyncClient} can reach the service, and the file is deleted only once the service has
- * said it holds the event. It exists so a fill recorded while offline, or right before the
- * client closes, is not lost — the alternative to writing it somewhere is losing it outright,
- * not sending it more directly.
+ * {@code events/} is a network outbox: a file is deleted only once the service says it holds
+ * the event, so a fill recorded while offline survives to be sent later.
  *
- * {@code state/} is this plugin's own memory of the eight Grand Exchange slots, read back by
- * {@link #readOfferState} the next time RuneLite starts so a fill can still be measured as a
- * delta against an offer that has been open for hours. Older versions of this plugin let the
- * desktop app read this same file directly; that arrangement is what the RuneLite Plugin Hub
- * refused a submission for, and it no longer exists on either side — the desktop app reads
- * live state through the website now, never this folder.
+ * {@code state/} is this plugin's memory of the eight Grand Exchange slots, so a fill can be
+ * measured as a delta against an offer that has been open for hours. Older versions let the
+ * desktop app read this folder directly — the arrangement the Plugin Hub refused a submission
+ * for. Nothing outside this plugin reads it now.
  */
 @Slf4j
 final class LocalSyncStore
@@ -150,14 +144,7 @@ final class LocalSyncStore
 		atomicWrite(statePath(accountHash), gson.toJson(snapshots));
 	}
 
-	/**
-	 * The events waiting to be sent, oldest first, and the file each one came from.
-	 *
-	 * The queue on disk is this plugin's own outbox and nothing else reads it. It exists so that
-	 * a fill recorded while the service is unreachable — or while the client is closed before it
-	 * could be sent — is still there to send afterwards. A file is deleted only once the service
-	 * has said it holds the event.
-	 */
+	/** The events waiting to be sent, oldest first, and the file each one came from. */
 	List<PendingEvent> readPendingEvents(int limit) throws IOException
 	{
 		initialize();
@@ -207,10 +194,9 @@ final class LocalSyncStore
 	/**
 	 * When a queued file was written, in epoch milliseconds.
 	 *
-	 * Read from the name {@link #writeEvent} gives it. A file queued by an older version has no
-	 * such prefix, so that one is asked of the filesystem — the same answer in the same units,
-	 * which is what lets the two kinds sort against each other while an upgraded queue drains.
-	 * Only those files cost a stat, and only until they are sent.
+	 * From the name where {@link #writeEvent} put it. A file queued by an older version has no
+	 * stamp and costs one stat — the same units, so the two kinds sort against each other until
+	 * the old queue drains.
 	 */
 	private long queuedAtOf(Path path)
 	{
@@ -385,19 +371,12 @@ final class LocalSyncStore
 	/**
 	 * Replace a file's contents in one step, retrying a moment later if the filesystem refuses.
 	 *
-	 * Windows denies the replacement outright while another process has the destination open —
-	 * antivirus scanning it, an indexer, a backup tool, someone's own text editor — so a write
-	 * can collide with a reader for no reason but timing. This file is not shared with anything
-	 * else this plugin talks to over the network; the only reader that matters to correctness
-	 * is this same plugin's own {@link #readOfferState}, on the next RuneLite start. Losing a
-	 * write there leaves the saved offers behind the real ones, and the next client to start
-	 * diffs live offers against that stale picture: an offer it has been following for hours
-	 * looks brand new. A short wait outlives whatever briefly held the file, and the write
-	 * lands on the second or third try.
+	 * Windows denies a replacement while anything else holds the destination open — antivirus,
+	 * an indexer, a backup tool — so a write can collide with a reader on timing alone. Losing
+	 * one leaves saved offers behind the real ones, and the next client to start diffs against
+	 * that stale picture: an offer running for hours looks brand new.
 	 *
-	 * The first attempt happens inline; a contested attempt is retried by rescheduling itself
-	 * on the same background executor rather than blocking that thread, so one contested write
-	 * never stalls whatever is queued behind it.
+	 * A contested attempt reschedules itself on the same executor rather than blocking it.
 	 */
 	private void atomicWrite(Path destination, String contents) throws IOException
 	{

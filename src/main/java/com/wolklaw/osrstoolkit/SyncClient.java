@@ -16,9 +16,8 @@ import okio.Okio;
 /**
  * Talks to the OSRS Toolkit sync service.
  *
- * Every call is queued on OkHttp's own thread pool rather than executed inline, so nothing here
- * can hold up the client thread or the thread that owns the outbox. Results come back on an
- * OkHttp thread; callers that care about ordering hand the answer to their own executor.
+ * Every call goes on OkHttp's thread pool, so nothing here holds up the client thread or the
+ * one that owns the outbox. Results arrive on an OkHttp thread.
  */
 @Slf4j
 final class SyncClient
@@ -26,33 +25,20 @@ final class SyncClient
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
 	/**
-	 * Where the service lives.
-	 *
-	 * Compiled in rather than configurable. It was a setting once, on the reasoning that
-	 * somebody running their own copy would want to point at it — but the server is open
-	 * source, so anyone running their own copy is already building from source and can change
-	 * this line. What a settings field actually bought was a way for everyone else to break
-	 * their own sync with a typo, in a field they had no reason to touch.
+	 * Compiled in rather than configurable: the server is open source, so anyone self-hosting
+	 * is already building from source. As a settings field it mostly offered a way to break
+	 * your own sync with a typo.
 	 */
 	static final String SERVICE_URL = "https://sync.runescope.app";
 
 	/**
-	 * Who is calling, said plainly.
-	 *
-	 * Not politeness. A CDN in front of the service decides what to let through partly on this,
-	 * and the default here is OkHttp's own name — a generic signature shared with every other
-	 * Java client on the internet, and one a blocklist could add tomorrow. The address this
-	 * plugin calls is compiled into installs that cannot be updated quickly, so being turned
-	 * away for looking generic would break every user at once with a fix that has to clear
-	 * Plugin Hub review first. A name of our own cannot be caught by that.
+	 * Not politeness: the CDN in front of the service filters partly on this, and OkHttp's
+	 * default name is shared with every other Java client on the internet. Being blocked for
+	 * looking generic would break every install at once, behind a fix that needs Hub review.
 	 */
 	private static final String USER_AGENT = "OSRS-Toolkit-Sync/1.0 (+https://runescope.app)";
 
-	/**
-	 * What became of one request. The distinction that matters is whether the payload is worth
-	 * sending again: a refused payload never will be, so keeping it would block the queue behind
-	 * it forever.
-	 */
+	/** What became of one request: whether the payload is worth sending again. */
 	enum Outcome
 	{
 		/** Stored. Anything queued for this request can be dropped. */
