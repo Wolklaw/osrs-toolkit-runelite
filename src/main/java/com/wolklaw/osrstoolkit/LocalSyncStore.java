@@ -20,6 +20,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -45,6 +46,9 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 final class LocalSyncStore
 {
+	// Width of the millisecond timestamp queued filenames start with. Fixed and zero-padded so
+	// that names sort in the order the events were queued.
+	private static final int QUEUED_AT_DIGITS = 13;
 	private static final int REPLACE_ATTEMPTS = 3;
 	private static final long REPLACE_RETRY_MILLIS = 40;
 
@@ -69,10 +73,19 @@ final class LocalSyncStore
 		Files.createDirectories(state);
 	}
 
+	/**
+	 * Queue one event for sending.
+	 *
+	 * The filename carries the moment it was queued, zero-padded so that sorting the names
+	 * sorts them by age. That is what lets {@link #readPendingEvents} order the queue without
+	 * asking the filesystem for each file's timestamp.
+	 */
 	void writeEvent(SyncEvent event) throws IOException
 	{
 		initialize();
-		atomicWrite(events.resolve(event.event_id + ".json"), gson.toJson(event));
+		String name = String.format("%0" + QUEUED_AT_DIGITS + "d-%s.json",
+			System.currentTimeMillis(), event.event_id);
+		atomicWrite(events.resolve(name), gson.toJson(event));
 	}
 
 	Map<Integer, OfferSnapshot> readOfferState(String accountHash) throws IOException
@@ -148,23 +161,35 @@ final class LocalSyncStore
 	List<PendingEvent> readPendingEvents(int limit) throws IOException
 	{
 		initialize();
-		List<AgedFile> files = new ArrayList<>();
+		// Age comes from the name rather than a stat per file. This runs every few seconds, and
+		// a queue built up while the service was away holds up to twenty thousand events — so
+		// asking the filesystem for each one was tens of thousands of syscalls a pass, worst
+		// after a refused batch drops the limit to one and the whole directory is walked to
+		// find a single event to retry.
+		//
+		// Only the oldest `limit` are held as the listing streams past, so nothing bigger than
+		// one batch is ever kept or sorted.
+		PriorityQueue<QueuedFile> oldest = new PriorityQueue<>(
+			Math.max(1, limit),
+			Comparator.comparingLong((QueuedFile file) -> file.queuedAt).reversed()
+		);
 		try (DirectoryStream<Path> stream = Files.newDirectoryStream(events, "*.json"))
 		{
 			for (Path path : stream)
 			{
-				files.add(new AgedFile(path, lastModifiedSafely(path)));
+				oldest.add(new QueuedFile(path, queuedAtOf(path)));
+				if (oldest.size() > limit)
+				{
+					oldest.poll();
+				}
 			}
 		}
-		files.sort(Comparator.comparing((AgedFile file) -> file.lastModified));
+		List<QueuedFile> ordered = new ArrayList<>(oldest);
+		ordered.sort(Comparator.comparingLong(file -> file.queuedAt));
 
 		List<PendingEvent> pending = new ArrayList<>();
-		for (AgedFile file : files)
+		for (QueuedFile file : ordered)
 		{
-			if (pending.size() >= limit)
-			{
-				break;
-			}
 			try
 			{
 				pending.add(new PendingEvent(file.path, Files.readString(file.path, StandardCharsets.UTF_8)));
@@ -177,6 +202,44 @@ final class LocalSyncStore
 			}
 		}
 		return pending;
+	}
+
+	/**
+	 * When a queued file was written, in epoch milliseconds.
+	 *
+	 * Read from the name {@link #writeEvent} gives it. A file queued by an older version has no
+	 * such prefix, so that one is asked of the filesystem — the same answer in the same units,
+	 * which is what lets the two kinds sort against each other while an upgraded queue drains.
+	 * Only those files cost a stat, and only until they are sent.
+	 */
+	private long queuedAtOf(Path path)
+	{
+		String name = path.getFileName().toString();
+		if (name.length() > QUEUED_AT_DIGITS && name.charAt(QUEUED_AT_DIGITS) == '-')
+		{
+			try
+			{
+				return Long.parseLong(name.substring(0, QUEUED_AT_DIGITS));
+			}
+			catch (NumberFormatException ex)
+			{
+				// Not a timestamp after all; fall through and ask the filesystem.
+			}
+		}
+		return lastModifiedSafely(path).toEpochMilli();
+	}
+
+	/** A queued file and when it was queued, worked out once rather than on every comparison. */
+	private static final class QueuedFile
+	{
+		private final Path path;
+		private final long queuedAt;
+
+		private QueuedFile(Path path, long queuedAt)
+		{
+			this.path = path;
+			this.queuedAt = queuedAt;
+		}
 	}
 
 	void deleteEvent(Path path)

@@ -282,6 +282,77 @@ public class LocalSyncStoreTest
 		assertTrue(Files.exists(scratch));
 	}
 
+	@Test
+	public void queuedFilesCarryTheMomentTheyWereQueued() throws IOException
+	{
+		store.writeEvent(SyncEvent.geOfferCancelled("abc123", "Zed", buyingSnapshot()));
+
+		try (Stream<Path> files = Files.list(eventsDir()))
+		{
+			String name = files.map(path -> path.getFileName().toString()).findFirst().orElse("");
+			// A fixed-width millisecond stamp, so sorting the names sorts them by age — which
+			// is what lets the queue be ordered without a stat per file.
+			assertTrue(name, name.matches("\\d{13}-.+\\.json"));
+		}
+	}
+
+	@Test
+	public void queuedEventsAreOrderedWithoutAskingTheFilesystem() throws IOException
+	{
+		Path newer = writeStampedEvent(2_000_000_000_000L, "newer");
+		Path older = writeStampedEvent(1_000_000_000_000L, "older");
+		// Deliberately the wrong way round on disk: if ordering came from the file's own
+		// timestamp rather than its name, "newer" was written first and would come back first.
+		setModifiedDaysAgo(newer, 9);
+		setModifiedDaysAgo(older, 1);
+
+		List<LocalSyncStore.PendingEvent> pending = store.readPendingEvents(10);
+
+		assertEquals(
+			List.of(older, newer),
+			pending.stream().map(event -> event.path).collect(Collectors.toList())
+		);
+	}
+
+	@Test
+	public void aQueueFromAnOlderVersionStillDrainsInOrder() throws IOException
+	{
+		// No stamp in the name, so age has to come from the filesystem — the two kinds sort
+		// against each other while an upgraded queue empties.
+		Path legacy = writeEvent("legacy");
+		setModifiedDaysAgo(legacy, 30);
+		Path stamped = writeStampedEvent(System.currentTimeMillis(), "stamped");
+
+		List<LocalSyncStore.PendingEvent> pending = store.readPendingEvents(10);
+
+		assertEquals(
+			List.of(legacy, stamped),
+			pending.stream().map(event -> event.path).collect(Collectors.toList())
+		);
+	}
+
+	@Test
+	public void onlyTheBatchIsReadEvenWithAFullQueue() throws IOException
+	{
+		for (int index = 0; index < 50; index++)
+		{
+			writeStampedEvent(1_000_000_000_000L + index, "event-" + index);
+		}
+
+		List<LocalSyncStore.PendingEvent> pending = store.readPendingEvents(1);
+
+		assertEquals(1, pending.size());
+		assertEquals("1000000000000-event-0.json", pending.get(0).path.getFileName().toString());
+	}
+
+	private Path writeStampedEvent(long queuedAtMillis, String name) throws IOException
+	{
+		Files.createDirectories(eventsDir());
+		Path path = eventsDir().resolve(String.format("%013d-%s.json", queuedAtMillis, name));
+		Files.writeString(path, "{}");
+		return path;
+	}
+
 	private Path writeEvent(String name) throws IOException
 	{
 		Path path = eventsDir().resolve(name + ".json");
