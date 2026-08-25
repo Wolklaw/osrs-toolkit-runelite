@@ -186,6 +186,12 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		store = new LocalSyncStore(gson, RuneLite.RUNELITE_DIR.toPath(), ioExecutor);
 		syncClient = new SyncClient(okHttpClient);
 		applyConnectionSettings();
+		if (!config.syncEnabled())
+		{
+			// The status line persists between sessions, so without this it would still be
+			// showing whatever was true when sync was last on.
+			setStatus("Not sending. Switch on \"Send to OSRS Toolkit Sync\" above.");
+		}
 		submitIo("initialize the outbox", store::initialize);
 		// Emptying the outbox is the only thing that actually reaches the service. Everything
 		// else this plugin records simply lands in it.
@@ -1127,7 +1133,15 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			return;
 		}
-		client.send("v1/heartbeat", heartbeatBody(), outcome -> { });
+		// The status line follows the routine heartbeat as well as a settings change, or it would
+		// go on claiming a live connection for as long as nobody touched a setting — the service
+		// going down mid-session being exactly when it most needs to stop saying that. Silent:
+		// the chatbox is for an answer somebody just asked for.
+		client.send(
+			"v1/heartbeat",
+			heartbeatBody(),
+			outcome -> clientThread.invokeLater(() -> setStatus(statusFor(outcome)))
+		);
 	}
 
 	/**
@@ -1185,26 +1199,20 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	 */
 	private void reportConnectionResult(SyncClient.Outcome outcome)
 	{
+		setStatus(statusFor(outcome));
 		switch (outcome)
 		{
 			case DELIVERED:
-				// Named rather than a bare "connected": on an account with several characters
-				// the useful question is which one this token is now carrying.
-				setStatus("Connected"
-					+ ("unknown".equals(accountHash) ? "." : " as " + accountName + "."));
 				say(GOOD, "pairing token accepted. This character is syncing.");
 				break;
 			case UNAUTHORIZED:
-				setStatus("Token not accepted. Copy it again from your Profile page on runescope.app.");
 				say(BAD, "that pairing token was not accepted. Copy it again from the Profile "
 					+ "page on runescope.app.");
 				break;
 			case REFUSED:
-				setStatus("The sync service refused that request.");
 				say(BAD, "the sync service refused that request.");
 				break;
 			default:
-				setStatus("Could not reach the sync service. Nothing is lost.");
 				say(BAD, "could not reach the sync service. Nothing is lost — what this plugin "
 					+ "records is kept and sent when the service comes back.");
 				break;
@@ -1238,6 +1246,25 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	 *
 	 * Written only on change, or the minute heartbeat would re-save the same sentence forever.
 	 */
+	/** The settings-panel wording for one request's outcome. */
+	private String statusFor(SyncClient.Outcome outcome)
+	{
+		switch (outcome)
+		{
+			case DELIVERED:
+				// Named rather than a bare "connected": on an account with several characters,
+				// which one this token is carrying is the useful part.
+				return "Connected"
+					+ ("unknown".equals(accountHash) ? "." : " as " + accountName + ".");
+			case UNAUTHORIZED:
+				return "Token not accepted. Copy it again from your Profile page on runescope.app.";
+			case REFUSED:
+				return "The sync service refused that request.";
+			default:
+				return "Could not reach the sync service. Nothing is lost.";
+		}
+	}
+
 	private void setStatus(String status)
 	{
 		if (status.equals(config.connectionStatus()))
