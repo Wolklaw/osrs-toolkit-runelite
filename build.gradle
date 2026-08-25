@@ -31,7 +31,7 @@ group = 'com.wolklaw.osrstoolkit'
 // Kept in step with runelite-plugin.properties. Unset, `project.version` renders as the
 // literal "unspecified" in the shadowJar's filename, which the install instructions then
 // have to explain away as not being a mistake.
-version = '1.0.0'
+version = '1.0.1'
 
 tasks.withType(JavaCompile).configureEach {
 	options.encoding = 'UTF-8'

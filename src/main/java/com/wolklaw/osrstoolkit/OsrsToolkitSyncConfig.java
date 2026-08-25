@@ -44,8 +44,8 @@ public interface OsrsToolkitSyncConfig extends Config
 		keyName = "pairingToken",
 		name = "Pairing token",
 		description = "The token from your Profile page on runescope.app. Paste it here and "
-			+ "this plugin says in the chatbox whether it was accepted. It identifies your "
-			+ "queue and nothing else.",
+			+ "the Status line below says whether it was accepted. It identifies your queue "
+			+ "and nothing else.",
 		secret = true,
 		section = connectionSection,
 		position = 1
@@ -53,6 +53,30 @@ public interface OsrsToolkitSyncConfig extends Config
 	default String pairingToken()
 	{
 		return "";
+	}
+
+	/**
+	 * Written by the plugin, not by the player.
+	 *
+	 * The token field is a password field -- {@code secret} renders one -- so pasting into it
+	 * shows a row of dots and no way to tell a good paste from a bad one. The chatbox answer
+	 * this used to rely on does not exist at the login screen, which is where a plugin is
+	 * usually set up. This line is in the panel the token was pasted into, and it reads the
+	 * same whether or not anyone is logged in.
+	 *
+	 * Editing it does nothing: the next thing the plugin learns overwrites it.
+	 */
+	@ConfigItem(
+		keyName = "connectionStatus",
+		name = "Status",
+		description = "Whether the token above was accepted. Set by the plugin; editing it "
+			+ "has no effect.",
+		section = connectionSection,
+		position = 2
+	)
+	default String connectionStatus()
+	{
+		return "Not sending yet.";
 	}
 
 	@ConfigItem(

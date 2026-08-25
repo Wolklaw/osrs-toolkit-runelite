@@ -119,6 +119,10 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	private static final int MAX_FLUSH_BYTES = 512 * 1024;
 	private static final String BUY_EXAMINE_CALLBACK = "geBuyExamineText";
 	private static final String SELL_EXAMINE_CALLBACK = "geSellExamineText";
+	// The status line this plugin writes to. Named here because onConfigChanged has to ignore
+	// its own writes: reacting to them would re-test the connection, which writes the status
+	// again, which arrives back here.
+	private static final String STATUS_KEY = "connectionStatus";
 
 	@Inject
 	private Client client;
@@ -137,6 +141,9 @@ public class OsrsToolkitSyncPlugin extends Plugin
 
 	@Inject
 	private OkHttpClient okHttpClient;
+
+	@Inject
+	private ConfigManager configManager;
 
 	private final Map<String, Map<Integer, OfferSnapshot>> accountOffers = new HashMap<>();
 	private final Set<String> loadedAccounts = new HashSet<>();
@@ -520,6 +527,12 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			return;
 		}
+		if (STATUS_KEY.equals(event.getKey()))
+		{
+			// This plugin's own writing. Going on would re-test the connection, which writes
+			// the status again, which arrives back here.
+			return;
+		}
 		playerTradeTracking = config.trackPlayerTrades();
 		applyConnectionSettings();
 		// Only when the address, token, or the toggle itself just changed — not on every field
@@ -789,7 +802,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 				continue;
 			}
 			ItemComposition composition = client.getItemDefinition(item.getId());
-			String name = composition == null ? "Unknown item" : composition.getName();
+			String name = itemNameOf(composition);
 			int unitValue = item.getId() == ItemID.COINS
 				? 1
 				: Math.max(0, itemManager.getItemPrice(item.getId()));
@@ -815,7 +828,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 				continue;
 			}
 			ItemComposition composition = client.getItemDefinition(stack.getId());
-			String name = composition == null ? "Unknown item" : composition.getName();
+			String name = itemNameOf(composition);
 			int unitValue = stack.getId() == ItemID.COINS
 				? 1
 				: Math.max(0, itemManager.getItemPrice(stack.getId()));
@@ -859,6 +872,22 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		store.deleteStaleTemporaryFiles(Duration.ofHours(1));
 	}
 
+	/**
+	 * An item's name, never null.
+	 *
+	 * A definition can exist and still have no name. The Grand Exchange path already checked
+	 * for both; the three callers of this did not, so a nameless definition reached the journal
+	 * as a row with no name at all rather than one saying it could not be identified.
+	 */
+	private static String itemNameOf(ItemComposition composition)
+	{
+		if (composition == null || composition.getName() == null)
+		{
+			return "Unknown item";
+		}
+		return composition.getName();
+	}
+
 	private List<SyncItem> toSyncItems(Map<Integer, Integer> items)
 	{
 		List<SyncItem> result = new ArrayList<>();
@@ -866,7 +895,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			int itemId = item.getKey();
 			ItemComposition composition = client.getItemDefinition(itemId);
-			String name = composition == null ? "Unknown item" : composition.getName();
+			String name = itemNameOf(composition);
 			int unitValue = itemId == ItemID.COINS ? 1 : Math.max(0, itemManager.getItemPrice(itemId));
 			result.add(new SyncItem(itemId, name, item.getValue(), unitValue));
 		}
@@ -1144,16 +1173,23 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		}
 		if (!syncClientRef.isConfigured())
 		{
-			// No token, so there is nothing to test. Silence would be the wrong answer while
-			// sync is switched on: that is someone who believes they have set this up, and the
-			// one thing still missing is the thing they would never guess at.
-			if (config.syncEnabled())
+			// Nothing to test, but not nothing to say. Both halves of "not set up yet" used to
+			// end here in silence when sync was off -- and pasting the token before reaching
+			// for the switch is the order the website's own instructions produce, so the very
+			// first thing most people do got no answer at all.
+			if (!config.syncEnabled())
 			{
+				setStatus("Not sending. Switch on \"Send to OSRS Toolkit Sync\" above.");
+			}
+			else
+			{
+				setStatus("No pairing token yet. Copy one from your Profile page on runescope.app.");
 				say(BAD, "no pairing token yet. Copy one from the Profile page on "
 					+ "runescope.app and paste it above.");
 			}
 			return;
 		}
+		setStatus("Checking the token…");
 		syncClientRef.send(
 			"v1/heartbeat",
 			heartbeatBody(),
@@ -1180,16 +1216,23 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		switch (outcome)
 		{
 			case DELIVERED:
+				// Named rather than a bare "connected": on an account with several characters
+				// the useful question is which one this token is now carrying.
+				setStatus("Connected"
+					+ ("unknown".equals(accountHash) ? "." : " as " + accountName + "."));
 				say(GOOD, "pairing token accepted. This character is syncing.");
 				break;
 			case UNAUTHORIZED:
+				setStatus("Token not accepted. Copy it again from your Profile page on runescope.app.");
 				say(BAD, "that pairing token was not accepted. Copy it again from the Profile "
 					+ "page on runescope.app.");
 				break;
 			case REFUSED:
+				setStatus("The sync service refused that request.");
 				say(BAD, "the sync service refused that request.");
 				break;
 			default:
+				setStatus("Could not reach the sync service. Nothing is lost.");
 				say(BAD, "could not reach the sync service. Nothing is lost — what this plugin "
 					+ "records is kept and sent when the service comes back.");
 				break;
@@ -1212,6 +1255,26 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			"OSRS Toolkit Sync: " + color + message + "</col>",
 			null
 		);
+	}
+
+	/**
+	 * Put one line in the settings panel saying where the connection stands.
+	 *
+	 * The chatbox alone was not enough. It does not exist at the login screen, which is where
+	 * a plugin is usually set up, and the field the token goes into is a password field -- so
+	 * pasting showed a row of dots and then, quite often, nothing at all. This says the same
+	 * thing in the panel the token was pasted into, logged in or not.
+	 *
+	 * Written only when the answer actually changes: every write is a config write, and the
+	 * routine heartbeat would otherwise re-save the same sentence once a minute forever.
+	 */
+	private void setStatus(String status)
+	{
+		if (status.equals(config.connectionStatus()))
+		{
+			return;
+		}
+		configManager.setConfiguration(OsrsToolkitSyncConfig.GROUP, STATUS_KEY, status);
 	}
 
 	/**
