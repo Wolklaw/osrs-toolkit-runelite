@@ -194,9 +194,16 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		syncClient = new SyncClient(okHttpClient);
 		panel = new OsrsToolkitSyncPanel(
 			config.pairingToken(),
-			token -> configManager.setConfiguration(
-				OsrsToolkitSyncConfig.GROUP, OsrsToolkitSyncConfig.PAIRING_TOKEN_KEY, token
-			)
+			token -> {
+				configManager.setConfiguration(
+					OsrsToolkitSyncConfig.GROUP, OsrsToolkitSyncConfig.PAIRING_TOKEN_KEY, token
+				);
+				// ConfigManager does not post ConfigChanged when the new value equals the old
+				// one, so onConfigChanged's own trigger never fires for this exact case -- and
+				// resubmitting the same token after a failed attempt is the ordinary way
+				// someone retries. Called explicitly so Connect always does something.
+				testConnectionAndReport();
+			}
 		);
 		navButton = NavigationButton.builder()
 			.tooltip("OSRS Toolkit Sync")
@@ -208,10 +215,18 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		applyConnectionSettings();
 		if (!config.syncEnabled())
 		{
-			// The panel is freshly built, but its constructor already defaults to this same
-			// wording -- this is for the case where sync was on last session and the panel's
-			// default would otherwise disagree with what config actually says.
+			// Already what the panel's own constructor defaults to; set again in case this is
+			// a second startUp() in the same session and the last thing shown was something else.
 			panel.setNeutral("Not sending. Switch on \"Send to OSRS Toolkit Sync\" in this plugin's settings.");
+		}
+		else
+		{
+			// The constructor's default is "Not sending", which is wrong the moment sync was
+			// already on from a previous session -- the heartbeat scheduled just below will
+			// correct it almost immediately, since it runs with no initial delay, but "almost
+			// immediately" is not "correct from the first frame", and nothing enforces that
+			// delay stays zero.
+			panel.setChecking("Checking the token…");
 		}
 		submitIo("initialize the outbox", store::initialize);
 		// Emptying the outbox is the only thing that actually reaches the service. Everything
@@ -1258,10 +1273,10 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	/**
 	 * One line in the chatbox, under this plugin's name and in the colour of the answer.
 	 *
-	 * The colour is doing real work rather than decoration: this is the whole of the pairing
-	 * confirmation, because RuneLite's settings panel has no way to draw a tick beside a text
-	 * field, and a wall of identically grey console lines is where "did that work" goes to be
-	 * missed.
+	 * The sidebar panel is the persistent answer now; this is the one that reaches someone who
+	 * is not looking at it. Pasting a token and clicking away, with the sidebar closed, gets a
+	 * game message either way -- and it is still the only channel that exists at all before the
+	 * sidebar panel has ever been opened once this session.
 	 */
 	private void say(String color, String message)
 	{
