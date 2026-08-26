@@ -10,9 +10,14 @@ public interface OsrsToolkitSyncConfig extends Config
 {
 	String GROUP = "osrs-toolkit-sync";
 
+	/** The pairing token's own key, referenced by both {@link #pairingToken} and the plugin
+	 * that listens for it changing. */
+	String PAIRING_TOKEN_KEY = "pairingToken";
+
 	@ConfigSection(
 		name = "Connection",
-		description = "The token that says what this plugin records is yours",
+		description = "The master switch. The pairing token and a live connection status are "
+			+ "in this plugin's sidebar panel, not here.",
 		position = 0
 	)
 	String connectionSection = "connection";
@@ -29,7 +34,7 @@ public interface OsrsToolkitSyncConfig extends Config
 		name = "Send to OSRS Toolkit Sync",
 		description = "Send what this plugin records to the OSRS Toolkit sync service, so "
 			+ "runescope.app can show it. Nothing is sent until this is on and a pairing token "
-			+ "is filled in below.",
+			+ "is entered in this plugin's sidebar panel.",
 		warning = "This feature submits your IP address to a 3rd-party server not controlled or "
 			+ "verified by RuneLite developers",
 		section = connectionSection,
@@ -40,43 +45,26 @@ public interface OsrsToolkitSyncConfig extends Config
 		return false;
 	}
 
+	/**
+	 * Hidden rather than removed: still the one place this value is actually stored, still
+	 * read by {@code applyConnectionSettings}, still what the sidebar panel writes to and
+	 * reads its starting value from. RuneLite's config panel draws a field once, when it is
+	 * opened, and has no listener for a value changing under it -- a token typed here would
+	 * show pasted dots and then nothing, the exact problem the sidebar panel exists to fix.
+	 */
 	@ConfigItem(
-		keyName = "pairingToken",
+		keyName = PAIRING_TOKEN_KEY,
 		name = "Pairing token",
-		description = "The token from your Profile page on runescope.app. Paste it here and "
-			+ "the Status line below says whether it was accepted. It identifies your queue "
-			+ "and nothing else.",
+		description = "The token from your Profile page on runescope.app. Entered from this "
+			+ "plugin's sidebar panel, not here.",
 		secret = true,
+		hidden = true,
 		section = connectionSection,
 		position = 1
 	)
 	default String pairingToken()
 	{
 		return "";
-	}
-
-	/**
-	 * Written by the plugin, not by the player.
-	 *
-	 * The token field is a password field -- {@code secret} renders one -- so pasting into it
-	 * shows a row of dots and no way to tell a good paste from a bad one. The chatbox answer
-	 * this used to rely on does not exist at the login screen, which is where a plugin is
-	 * usually set up. This line is in the panel the token was pasted into, and it reads the
-	 * same whether or not anyone is logged in.
-	 *
-	 * Editing it does nothing: the next thing the plugin learns overwrites it.
-	 */
-	@ConfigItem(
-		keyName = "connectionStatus",
-		name = "Status",
-		description = "Whether the token above was accepted. Set by the plugin; editing it "
-			+ "has no effect.",
-		section = connectionSection,
-		position = 2
-	)
-	default String connectionStatus()
-	{
-		return "Not sending yet.";
 	}
 
 	@ConfigItem(

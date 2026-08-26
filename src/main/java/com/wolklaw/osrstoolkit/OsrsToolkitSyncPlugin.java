@@ -62,6 +62,9 @@ import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.ui.ClientToolbar;
+import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.Text;
 import okhttp3.OkHttpClient;
 
@@ -107,10 +110,6 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	// tells the two apart this same way.
 	private static final String BUY_EXAMINE_CALLBACK = "geBuyExamineText";
 	private static final String SELL_EXAMINE_CALLBACK = "geSellExamineText";
-	// The status line this plugin writes to. Named here because onConfigChanged has to ignore
-	// its own writes: reacting to them would re-test the connection, which writes the status
-	// again, which arrives back here.
-	private static final String STATUS_KEY = "connectionStatus";
 
 	@Inject
 	private Client client;
@@ -132,6 +131,14 @@ public class OsrsToolkitSyncPlugin extends Plugin
 
 	@Inject
 	private ConfigManager configManager;
+
+	@Inject
+	private ClientToolbar clientToolbar;
+
+	// Written on the Swing thread in startUp/shutDown, read from the client thread whenever a
+	// connection outcome needs to reach the sidebar -- the same cross-thread shape as syncClient.
+	private volatile OsrsToolkitSyncPanel panel;
+	private NavigationButton navButton;
 
 	private final Map<String, Map<Integer, OfferSnapshot>> accountOffers = new HashMap<>();
 	private final Set<String> loadedAccounts = new HashSet<>();
@@ -185,12 +192,26 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		});
 		store = new LocalSyncStore(gson, RuneLite.RUNELITE_DIR.toPath(), ioExecutor);
 		syncClient = new SyncClient(okHttpClient);
+		panel = new OsrsToolkitSyncPanel(
+			config.pairingToken(),
+			token -> configManager.setConfiguration(
+				OsrsToolkitSyncConfig.GROUP, OsrsToolkitSyncConfig.PAIRING_TOKEN_KEY, token
+			)
+		);
+		navButton = NavigationButton.builder()
+			.tooltip("OSRS Toolkit Sync")
+			.icon(ImageUtil.loadImageResource(getClass(), "icon.png"))
+			.priority(5)
+			.panel(panel)
+			.build();
+		clientToolbar.addNavigation(navButton);
 		applyConnectionSettings();
 		if (!config.syncEnabled())
 		{
-			// The status line persists between sessions, so without this it would still be
-			// showing whatever was true when sync was last on.
-			setStatus("Not sending. Switch on \"Send to OSRS Toolkit Sync\" above.");
+			// The panel is freshly built, but its constructor already defaults to this same
+			// wording -- this is for the case where sync was on last session and the panel's
+			// default would otherwise disagree with what config actually says.
+			panel.setNeutral("Not sending. Switch on \"Send to OSRS Toolkit Sync\" in this plugin's settings.");
 		}
 		submitIo("initialize the outbox", store::initialize);
 		// Emptying the outbox is the only thing that actually reaches the service. Everything
@@ -224,6 +245,12 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		if (navButton != null)
+		{
+			clientToolbar.removeNavigation(navButton);
+			navButton = null;
+		}
+		panel = null;
 		// Cancelled without interrupting. A task caught mid-flight here is a file being replaced
 		// under a reader in the desktop app; letting it finish costs milliseconds on a background
 		// thread, while interrupting it can leave a scratch file behind for the sweep to find.
@@ -519,12 +546,6 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			return;
 		}
-		if (STATUS_KEY.equals(event.getKey()))
-		{
-			// This plugin's own writing. Going on would re-test the connection, which writes
-			// the status again, which arrives back here.
-			return;
-		}
 		playerTradeTracking = config.trackPlayerTrades();
 		applyConnectionSettings();
 		// Only when the address, token, or the toggle itself just changed — not on every field
@@ -534,7 +555,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		// heartbeat happens to be, up to a minute later.
 		if (
 			"syncEnabled".equals(event.getKey())
-			|| "pairingToken".equals(event.getKey())
+			|| OsrsToolkitSyncConfig.PAIRING_TOKEN_KEY.equals(event.getKey())
 		)
 		{
 			testConnectionAndReport();
@@ -1133,14 +1154,14 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			return;
 		}
-		// The status line follows the routine heartbeat as well as a settings change, or it would
-		// go on claiming a live connection for as long as nobody touched a setting — the service
+		// The panel follows the routine heartbeat as well as a settings change, or it would go
+		// on claiming a live connection for as long as nobody touched a setting — the service
 		// going down mid-session being exactly when it most needs to stop saying that. Silent:
 		// the chatbox is for an answer somebody just asked for.
 		client.send(
 			"v1/heartbeat",
 			heartbeatBody(),
-			outcome -> clientThread.invokeLater(() -> setStatus(statusFor(outcome)))
+			outcome -> clientThread.invokeLater(() -> applyOutcomeToPanel(outcome))
 		);
 	}
 
@@ -1163,19 +1184,34 @@ public class OsrsToolkitSyncPlugin extends Plugin
 			// end here in silence when sync was off -- and pasting the token before reaching
 			// for the switch is the order the website's own instructions produce, so the very
 			// first thing most people do got no answer at all.
+			OsrsToolkitSyncPanel panelRef = panel;
 			if (!config.syncEnabled())
 			{
-				setStatus("Not sending. Switch on \"Send to OSRS Toolkit Sync\" above.");
+				if (panelRef != null)
+				{
+					panelRef.setNeutral(
+						"Not sending. Switch on \"Send to OSRS Toolkit Sync\" in this plugin's settings."
+					);
+				}
 			}
 			else
 			{
-				setStatus("No pairing token yet. Copy one from your Profile page on runescope.app.");
+				if (panelRef != null)
+				{
+					panelRef.setNeutral(
+						"No pairing token yet. Paste one above, or copy it from your Profile page on runescope.app."
+					);
+				}
 				say(BAD, "no pairing token yet. Copy one from the Profile page on "
 					+ "runescope.app and paste it above.");
 			}
 			return;
 		}
-		setStatus("Checking the token…");
+		OsrsToolkitSyncPanel panelRef = panel;
+		if (panelRef != null)
+		{
+			panelRef.setChecking("Checking the token…");
+		}
 		syncClientRef.send(
 			"v1/heartbeat",
 			heartbeatBody(),
@@ -1199,7 +1235,7 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	 */
 	private void reportConnectionResult(SyncClient.Outcome outcome)
 	{
-		setStatus(statusFor(outcome));
+		applyOutcomeToPanel(outcome);
 		switch (outcome)
 		{
 			case DELIVERED:
@@ -1238,40 +1274,37 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	}
 
 	/**
-	 * Put one line in the settings panel saying where the connection stands.
+	 * Colour and wording for the sidebar panel, for one request's outcome.
 	 *
-	 * The chatbox does not exist at the login screen, where a plugin is usually set up, and the
-	 * token field is a password field — so pasting showed dots and then nothing. This reads the
-	 * same logged in or not.
-	 *
-	 * Written only on change, or the minute heartbeat would re-save the same sentence forever.
+	 * A no-op once the plugin has stopped: {@code panel} is nulled in {@code shutDown()}, and
+	 * an outcome from a request sent just before that can still arrive after.
 	 */
-	/** The settings-panel wording for one request's outcome. */
-	private String statusFor(SyncClient.Outcome outcome)
+	private void applyOutcomeToPanel(SyncClient.Outcome outcome)
 	{
+		OsrsToolkitSyncPanel panelRef = panel;
+		if (panelRef == null)
+		{
+			return;
+		}
 		switch (outcome)
 		{
 			case DELIVERED:
 				// Named rather than a bare "connected": on an account with several characters,
 				// which one this token is carrying is the useful part.
-				return "Connected"
-					+ ("unknown".equals(accountHash) ? "." : " as " + accountName + ".");
+				panelRef.setConnected(
+					"Connected" + ("unknown".equals(accountHash) ? "." : " as " + accountName + ".")
+				);
+				break;
 			case UNAUTHORIZED:
-				return "Token not accepted. Copy it again from your Profile page on runescope.app.";
+				panelRef.setRejected("Token not accepted. Copy it again from your Profile page on runescope.app.");
+				break;
 			case REFUSED:
-				return "The sync service refused that request.";
+				panelRef.setRejected("The sync service refused that request.");
+				break;
 			default:
-				return "Could not reach the sync service. Nothing is lost.";
+				panelRef.setUnreachable("Could not reach the sync service. Nothing is lost.");
+				break;
 		}
-	}
-
-	private void setStatus(String status)
-	{
-		if (status.equals(config.connectionStatus()))
-		{
-			return;
-		}
-		configManager.setConfiguration(OsrsToolkitSyncConfig.GROUP, STATUS_KEY, status);
 	}
 
 	/**
