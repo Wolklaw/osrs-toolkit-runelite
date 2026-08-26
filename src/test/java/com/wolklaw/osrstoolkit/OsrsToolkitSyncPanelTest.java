@@ -30,7 +30,7 @@ public class OsrsToolkitSyncPanelTest
 	{
 		OsrsToolkitSyncPanel panel = newPanel(new AtomicReference<>());
 		assertEquals("Not sending. Switch on \"Send to OSRS Toolkit Sync\" in this plugin's settings.",
-			plainText(panel));
+			panel.statusText());
 	}
 
 	@Test
@@ -62,7 +62,7 @@ public class OsrsToolkitSyncPanelTest
 
 		SwingUtilities.invokeAndWait(() -> panel.setConnected("Connected as Zed."));
 
-		assertEquals("Connected as Zed.", plainText(panel));
+		assertEquals("Connected as Zed.", panel.statusText());
 		assertEquals(ColorScheme.PROGRESS_COMPLETE_COLOR, panel.statusColor());
 	}
 
@@ -85,10 +85,5 @@ public class OsrsToolkitSyncPanelTest
 		SwingUtilities.invokeAndWait(() -> panel.setUnreachable("Could not reach the sync service."));
 
 		assertEquals(ColorScheme.BRAND_ORANGE, panel.statusColor());
-	}
-
-	private static String plainText(OsrsToolkitSyncPanel panel)
-	{
-		return panel.statusText().replace("<html>", "").replace("</html>", "");
 	}
 }

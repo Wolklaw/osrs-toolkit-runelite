@@ -3,15 +3,17 @@ package com.wolklaw.osrstoolkit;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
-import java.awt.FlowLayout;
 import java.awt.event.ActionListener;
 import java.util.function.Consumer;
 import javax.swing.BorderFactory;
+import javax.swing.Box;
+import javax.swing.BoxLayout;
 import javax.swing.JButton;
+import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JTextArea;
 import javax.swing.JTextField;
-import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
@@ -24,41 +26,35 @@ import net.runelite.client.ui.PluginPanel;
  * RuneLite's settings panel draws each field once, when it is opened, and has no listener for
  * a value changing underneath it -- a plugin writing its own connection status there through
  * {@code ConfigManager} updates what is stored, but the open panel never repaints to show it.
- * This panel is the plugin's own component, so it updates the moment {@link #setStatus} is
- * called, logged in or not.
+ * This panel is the plugin's own component, so it updates the moment {@link #apply} is called,
+ * logged in or not.
  */
 final class OsrsToolkitSyncPanel extends PluginPanel
 {
+	private static final int WIDTH = PluginPanel.PANEL_WIDTH - 2 * PluginPanel.BORDER_OFFSET;
+
 	private final JTextField tokenField = new JTextField();
-	private final JLabel statusLabel = new JLabel();
+	private final JTextArea statusLabel = wrappingText();
 
 	OsrsToolkitSyncPanel(String initialToken, Consumer<String> onSubmit)
 	{
 		super(false);
 		setLayout(new BorderLayout());
+		setBackground(ColorScheme.DARK_GRAY_COLOR);
 		setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
-		JLabel title = new JLabel("OSRS Toolkit Sync");
-		title.setFont(FontManager.getRunescapeBoldFont());
-		title.setForeground(Color.WHITE);
+		JPanel body = new JPanel();
+		body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
+		body.setBackground(ColorScheme.DARK_GRAY_COLOR);
 
-		JLabel help = new JLabel(
-			"<html>Paste the pairing token from your Profile page on runescope.app, then press "
-				+ "Enter or Connect.</html>");
-		help.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		help.setBorder(BorderFactory.createEmptyBorder(8, 0, 8, 0));
+		body.add(fullWidth(title()));
+		body.add(Box.createVerticalStrut(6));
+		body.add(fullWidth(help()));
+		body.add(Box.createVerticalStrut(12));
+		body.add(fullWidth(tokenField));
+		body.add(Box.createVerticalStrut(6));
 
-		tokenField.setText(initialToken);
-		tokenField.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-		tokenField.setForeground(Color.WHITE);
-		tokenField.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createLineBorder(ColorScheme.MEDIUM_GRAY_COLOR),
-			BorderFactory.createEmptyBorder(4, 6, 4, 6)
-		));
-
-		JButton connect = new JButton("Connect");
-		connect.setFocusPainted(false);
-
+		JButton connect = connectButton();
 		ActionListener submit = event -> {
 			String token = tokenField.getText().trim();
 			if (!token.isEmpty())
@@ -68,29 +64,103 @@ final class OsrsToolkitSyncPanel extends PluginPanel
 		};
 		tokenField.addActionListener(submit);
 		connect.addActionListener(submit);
+		body.add(fullWidth(connect));
+		body.add(Box.createVerticalStrut(10));
 
-		JPanel tokenRow = new JPanel(new BorderLayout(6, 0));
-		tokenRow.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		tokenRow.add(tokenField, BorderLayout.CENTER);
+		statusLabel.setFont(FontManager.getRunescapeSmallFont());
+		body.add(fullWidth(statusLabel));
 
-		JPanel buttonRow = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 6));
-		buttonRow.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		buttonRow.add(connect);
-
-		statusLabel.setHorizontalAlignment(SwingConstants.LEFT);
-		statusLabel.setBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0));
+		tokenField.setText(initialToken);
+		tokenField.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		tokenField.setForeground(Color.WHITE);
+		tokenField.setFont(FontManager.getRunescapeSmallFont());
 		setNeutral("Not sending. Switch on \"Send to OSRS Toolkit Sync\" in this plugin's settings.");
 
-		JPanel body = new JPanel();
-		body.setLayout(new javax.swing.BoxLayout(body, javax.swing.BoxLayout.Y_AXIS));
-		body.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		body.add(title);
-		body.add(help);
-		body.add(tokenRow);
-		body.add(buttonRow);
-		body.add(statusLabel);
-
 		add(body, BorderLayout.NORTH);
+	}
+
+	private static JLabel title()
+	{
+		JLabel title = new JLabel("OSRS Toolkit Sync");
+		title.setFont(FontManager.getRunescapeBoldFont());
+		title.setForeground(Color.WHITE);
+		return title;
+	}
+
+	private static JTextArea help()
+	{
+		JTextArea help = wrappingText();
+		help.setFont(FontManager.getRunescapeSmallFont());
+		help.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		setWrappedText(help,
+			"Paste the pairing token from your Profile page on runescope.app, then press "
+				+ "Enter or Connect.");
+		return help;
+	}
+
+	/**
+	 * A JLabel styled to look like one, but a real JTextArea underneath.
+	 *
+	 * An HTML JLabel does not know how many lines it needs until it has been laid out at a
+	 * real width, and by then BoxLayout has often already asked for its preferred size once
+	 * -- the classic Swing trap where wrapped text renders as one line, cropped. JTextArea
+	 * reflows against whatever width it is actually given, but only reliably reports that in
+	 * its own preferred size once it already knows that width, which is the same chicken-and
+	 * -egg problem one level down: see {@link #setWrappedText}.
+	 */
+	private static JTextArea wrappingText()
+	{
+		JTextArea text = new JTextArea();
+		text.setLineWrap(true);
+		text.setWrapStyleWord(true);
+		text.setEditable(false);
+		text.setFocusable(false);
+		text.setOpaque(false);
+		text.setBorder(null);
+		return text;
+	}
+
+	/**
+	 * Set a wrapping text area's content and lock in the preferred height that content needs
+	 * at this panel's fixed width, computed right now rather than left for BoxLayout to ask
+	 * for later.
+	 *
+	 * A freshly built or freshly retexted JTextArea has not been given a width by any layout
+	 * pass yet, so its own {@code getPreferredSize()} answers as if the text were one
+	 * unwrapped line -- which is what BoxLayout asks for the moment it first measures this
+	 * container, before ever assigning real widths. {@code setSize} first, so the text area's
+	 * view has something to wrap against when {@code getPreferredSize()} is asked immediately
+	 * after; the answer is then pinned down explicitly rather than trusted to survive.
+	 */
+	private static void setWrappedText(JTextArea area, String text)
+	{
+		area.setText(text);
+		area.setSize(WIDTH, Short.MAX_VALUE);
+		area.setPreferredSize(new Dimension(WIDTH, area.getPreferredSize().height));
+	}
+
+	private static JButton connectButton()
+	{
+		// setOpaque/setBorderPainted/setContentAreaFilled together are what it takes to get a
+		// flat, theme-colored button out of Swing's native look and feel rather than a
+		// Windows-grey one sitting in the middle of a dark panel.
+		JButton button = new JButton("Connect");
+		button.setFont(FontManager.getRunescapeSmallFont());
+		button.setForeground(Color.WHITE);
+		button.setBackground(ColorScheme.DARK_GRAY_HOVER_COLOR);
+		button.setFocusPainted(false);
+		button.setBorderPainted(false);
+		button.setOpaque(true);
+		return button;
+	}
+
+	/** Stretched to the panel's own width and pinned there, so BoxLayout does not shrink it
+	 *  back down to its content -- the failure mode that put the button in the corner. */
+	private static <T extends JComponent> T fullWidth(T component)
+	{
+		component.setAlignmentX(JComponent.LEFT_ALIGNMENT);
+		component.setMaximumSize(new Dimension(WIDTH, Integer.MAX_VALUE));
+		return component;
 	}
 
 	/** Neutral wording with no accent -- nothing has been tried yet, or nothing is wrong. */
@@ -132,8 +202,9 @@ final class OsrsToolkitSyncPanel extends PluginPanel
 	private void apply(String text, Color textColor, Color fieldAccent)
 	{
 		Runnable update = () -> {
-			statusLabel.setText("<html>" + text + "</html>");
+			setWrappedText(statusLabel, text);
 			statusLabel.setForeground(textColor);
+			statusLabel.revalidate();
 			tokenField.setBorder(BorderFactory.createCompoundBorder(
 				BorderFactory.createLineBorder(fieldAccent, 2),
 				BorderFactory.createEmptyBorder(3, 5, 3, 5)
