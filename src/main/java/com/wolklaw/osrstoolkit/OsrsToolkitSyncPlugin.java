@@ -398,9 +398,9 @@ public class OsrsToolkitSyncPlugin extends Plugin
 	{
 		if (event.getGroupId() == InterfaceID.GE_OFFERS)
 		{
-			// Answered here rather than left to the next tick: walking away from the Grand
-			// Exchange is the moment the desktop app's highlight stops meaning anything, and a
-			// tick of it pointing at a row nobody is standing in front of is a tick too many.
+			// Answered here rather than left to the next tick: the box is shut the instant the
+			// interface is, and a tick of the app still reporting one open on an item nobody
+			// is looking at is a tick too many.
 			clearOfferScreen();
 			return;
 		}
