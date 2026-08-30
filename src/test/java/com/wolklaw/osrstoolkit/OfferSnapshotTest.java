@@ -116,6 +116,26 @@ public class OfferSnapshotTest
 	}
 
 	@Test
+	public void aCollectedSlotReadsAsEmptySoAReconcileDropsIt()
+	{
+		// The positive case the two assertions above are the negatives of, and the one the
+		// heartbeat reconcile leans on: after the player collects, the game reports the slot
+		// as EMPTY, and it has to fall out of the map rather than be resent as a live offer.
+		OfferSnapshot collected = new OfferSnapshot();
+		collected.itemId = 100;
+		collected.totalQuantity = 10;
+		collected.state = "EMPTY";
+
+		assertTrue(collected.isEmpty());
+
+		OfferSnapshot neverUsed = new OfferSnapshot();
+		neverUsed.itemId = 0;
+		neverUsed.totalQuantity = 0;
+
+		assertTrue(neverUsed.isEmpty());
+	}
+
+	@Test
 	public void anUnusablePreviousSnapshotNeverContinuesALifecycle()
 	{
 		OfferSnapshot damaged = new OfferSnapshot();

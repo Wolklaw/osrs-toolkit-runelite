@@ -1162,6 +1162,81 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		}
 	}
 
+	/**
+	 * Re-read the eight slots from the game and send them if they disagree with what was last
+	 * sent.
+	 *
+	 * The offer state used to be written only from {@link #onGrandExchangeOfferChanged}, which
+	 * made a single missed event permanent. Miss the one that says a slot was collected — the
+	 * client was closed at that moment, "Track Grand Exchange fills" was off, one send failed —
+	 * and the service keeps serving that filled offer forever, because nothing else ever
+	 * revisits it. The heartbeat next door goes on saying the plugin is connected the whole
+	 * time, so the app shows a slot the player emptied days ago and looks confidently wrong.
+	 *
+	 * Reading the client's own offers rather than re-sending the stored copy is the point: the
+	 * store missed the same event, so it is wrong in exactly the same way. This is the only
+	 * path that can correct it.
+	 *
+	 * Runs on the client thread, which owns the offers; the send is handed back to the IO
+	 * thread. Silent when nothing moved, which is nearly every minute.
+	 */
+	private void reconcileOfferState()
+	{
+		if (!config.trackGrandExchange())
+		{
+			return;
+		}
+		updateAccount();
+		String eventAccountHash = accountHash;
+		if ("unknown".equals(eventAccountHash))
+		{
+			return;
+		}
+		GrandExchangeOffer[] live = client.getGrandExchangeOffers();
+		if (live == null)
+		{
+			return;
+		}
+		Map<Integer, OfferSnapshot> current = new HashMap<>();
+		for (int slot = 0; slot < live.length; slot++)
+		{
+			GrandExchangeOffer offer = live[slot];
+			if (offer == null)
+			{
+				continue;
+			}
+			String itemName = "Unknown item";
+			if (offer.getItemId() > 0)
+			{
+				ItemComposition composition = client.getItemDefinition(offer.getItemId());
+				if (composition != null && composition.getName() != null)
+				{
+					itemName = composition.getName();
+				}
+			}
+			OfferSnapshot snapshot = OfferSnapshot.from(slot, offer, itemName);
+			if (!snapshot.isEmpty())
+			{
+				current.put(slot, snapshot);
+			}
+		}
+		submitIo("reconcile Grand Exchange slots", () ->
+		{
+			Map<Integer, OfferSnapshot> stored = loadAccountOffers(eventAccountHash);
+			if (stored.keySet().equals(current.keySet()))
+			{
+				return;
+			}
+			// Only which slots are occupied is compared, not every field. A fill moving is
+			// already reported by the event path, and re-sending on every tiny change would
+			// turn a once-a-minute correction into a second stream of writes.
+			stored.clear();
+			stored.putAll(current);
+			store.writeOfferState(eventAccountHash, stored);
+			sendOfferState(eventAccountHash, stored);
+		});
+	}
+
 	private void sendHeartbeat()
 	{
 		SyncClient client = syncClient;
@@ -1169,6 +1244,9 @@ public class OsrsToolkitSyncPlugin extends Plugin
 		{
 			return;
 		}
+		// Piggy-backed on the heartbeat rather than given a timer of its own: it is the same
+		// question ("is what the service holds still true?") at the same cadence.
+		clientThread.invokeLater(this::reconcileOfferState);
 		// The panel follows the routine heartbeat as well as a settings change, or it would go
 		// on claiming a live connection for as long as nobody touched a setting — the service
 		// going down mid-session being exactly when it most needs to stop saying that. Silent:
